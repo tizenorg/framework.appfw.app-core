@@ -33,18 +33,16 @@ static int _set;
 
 void update_lang(void)
 {
-	char *lang;
-	char *r;
-
-	lang = vconf_get_str(VCONFKEY_LANGSET);
+	char *lang = vconf_get_str(VCONFKEY_LANGSET);
 	if (lang) {
 		setenv("LANG", lang, 1);
 		setenv("LC_MESSAGES", lang, 1);
-		r = setlocale(LC_ALL, "");
+		char *r = setlocale(LC_ALL, "");
 		if (r == NULL) {
-			r = setlocale(LC_ALL, vconf_get_str(VCONFKEY_LANGSET));
-			if (r)
+			r = setlocale(LC_ALL, lang);
+			if (r) {
 				_DBG("*****appcore setlocale=%s\n", r);
+			}
 		}
 		free(lang);
 	}
@@ -88,9 +86,14 @@ static int __set_i18n(const char *domain, const char *dir)
 	r = setlocale(LC_ALL, "");
 	/* if locale is not set properly, try again to set as language base */
 	if (r == NULL) {
-		r = setlocale(LC_ALL, vconf_get_str(VCONFKEY_LANGSET));
-		if (r)
+		char *lang = vconf_get_str(VCONFKEY_LANGSET);
+		r = setlocale(LC_ALL, lang);
+		if (r) {
 			_DBG("*****appcore setlocale=%s\n", r);
+		}
+		if (lang) {
+			free(lang);
+		}
 	}
 	if (r == NULL) {
 		_ERR("appcore: setlocale() error");

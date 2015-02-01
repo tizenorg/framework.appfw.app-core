@@ -34,10 +34,14 @@
 #include <X11/extensions/Xcomposite.h>
 #include <X11/extensions/XShm.h>
 #include <sys/shm.h>
+#ifdef WEARABLE
+#include <proc_stat.h>
+#endif
 
 #include <Ecore_X.h>
 #include <Ecore.h>
 #include <Ecore_Evas.h>
+#include <Evas.h>
 #include <Ecore_Input_Evas.h>
 #include <Elementary.h>
 #include <glib-object.h>
@@ -45,17 +49,18 @@
 #include <glib.h>
 #include <stdbool.h>
 #include <aul.h>
-#ifdef WEARABLE_PROFILE
-#include <proc_stat.h>
-#endif
 #include "appcore-internal.h"
 #include "appcore-efl.h"
 #include "virtual_canvas.h"
+#ifdef _APPFW_FEATURE_VISIBILITY_CHECK_BY_LCD_STATUS
+#include <vconf/vconf.h>
+#endif
 
 #define SYSMAN_MAXSTR 100
 #define SYSMAN_MAXARG 16
 #define SYSNOTI_SOCKET_PATH "/tmp/sn"
 #define RETRY_READ_COUNT	10
+#define MAX_PACKAGE_STR_SIZE 512
 
 #define PREDEF_BACKGRD				"backgrd"
 #define PREDEF_FOREGRD				"foregrd"
@@ -77,7 +82,8 @@ struct sysnoti {
 static pid_t _pid;
 
 static bool resource_reclaiming = TRUE;
-static int tmp_val = 0;
+static bool prelaunching = FALSE;
+
 
 
 struct ui_priv {
@@ -97,7 +103,7 @@ struct ui_priv {
 	/* WM_ROTATE */
 	int wm_rot_supported;
 	int rot_started;
-	int (*rot_cb) (enum appcore_rm, void *);
+	int (*rot_cb) (void *event_info, enum appcore_rm, void *);
 	void *rot_cb_data;
 	enum appcore_rm rot_mode;
 };
@@ -123,7 +129,10 @@ static const char *_as_name[] = {
 	[AS_DYING] = "DYING",
 };
 
-static bool b_active = 0;
+static int b_active = -1;
+static bool first_launch = 1;
+static int is_legacy_lifecycle = 0;
+
 struct win_node {
 	unsigned int win;
 	bool bfobscured;
@@ -211,6 +220,92 @@ static int sysnoti_send(struct sysnoti *msg)
 	return result;
 }
 
+void __trm_app_info_send_socket(char *write_buf)
+{
+        const char trm_socket_for_app_info[] = "/dev/socket/app_info";
+        int socket_fd = 0;
+        int ret = 0;
+        struct sockaddr_un addr;
+
+        _DBG("__trm_app_info_send_socket");
+
+        if (access(trm_socket_for_app_info, F_OK) != 0) {
+                _ERR("access");
+                goto trm_end;
+        }
+
+        socket_fd = socket(AF_LOCAL, SOCK_STREAM, 0);
+        if (socket_fd < 0) {
+                _ERR("socket");
+                goto trm_end;
+        }
+
+        memset(&addr, 0, sizeof(addr));
+        sprintf(addr.sun_path, "%s", trm_socket_for_app_info);
+        addr.sun_family = AF_LOCAL;
+
+        ret = connect(socket_fd, (struct sockaddr *) &addr ,sizeof(sa_family_t) + strlen(trm_socket_for_app_info) );
+        if (ret != 0) {
+                close(socket_fd);
+                goto trm_end;
+        }
+
+        send(socket_fd, write_buf, strlen(write_buf), MSG_DONTWAIT | MSG_NOSIGNAL);
+        _DBG("send");
+
+        close(socket_fd);
+trm_end:
+        return;
+}
+
+#ifdef _APPFW_FEATURE_CPU_BOOST
+static void __stop_cpu_boost(void)
+{
+	const char trm_sock_for_cpu_boost[] = "/dev/socket/scenario_info";
+	int sock_fd = 0;
+	int ret = 0;
+	struct sockaddr_un addr;
+	const char command[] = "AppLaunchUnlock";
+
+	_DBG("__stop_cpu_boost enter");
+
+	if (access(trm_sock_for_cpu_boost, F_OK) != 0) {
+		_ERR("access() failed, errno: %d (%s)", errno, strerror(errno));
+		goto error;
+	}
+
+	sock_fd = socket(AF_LOCAL, SOCK_STREAM, 0);
+	if (sock_fd < 0) {
+		_ERR("socket() failed, errno: %d (%s)", errno, strerror(errno));
+		goto error;
+	}
+
+	memset(&addr, 0, sizeof(addr));
+	sprintf(addr.sun_path, "%s", trm_sock_for_cpu_boost);
+	addr.sun_family = AF_LOCAL;
+
+	ret = connect(sock_fd, (struct sockaddr *) &addr, sizeof(sa_family_t) + strlen(trm_sock_for_cpu_boost));
+	if (ret != 0) {
+		_ERR("connect() failed, errno: %d (%s)", errno, strerror(errno));
+		close(sock_fd);
+		goto error;
+	}
+
+	ret = send(sock_fd, command, strlen(command), MSG_DONTWAIT | MSG_NOSIGNAL);
+	if (ret < 0) {
+		_ERR("send() failed, errno: %d (%s)", errno, strerror(errno));
+		close(sock_fd);
+		goto error;
+	}
+
+	close(sock_fd);
+	_DBG("__stop_cpu_boost ok");
+
+error:
+	return;
+}
+#endif
+
 static int _call_predef_action(const char *type, int num, ...)
 {
 	struct sysnoti *msg;
@@ -268,9 +363,14 @@ static int _inform_backgrd(void)
 
 
 char appid[APPID_MAX];
-bool taskmanage;
 
+#ifdef _APPFW_FEATURE_CAPTURE_FOR_TASK_MANAGER
+bool taskmanage;
 static void _capture_and_make_file(Ecore_X_Window win, int pid, const char *package);
+#endif
+
+static bool __check_skip(Ecore_X_Window xwin);
+
 
 static int WIN_COMP(gconstpointer data1, gconstpointer data2)
 {
@@ -334,10 +434,36 @@ static void __appcore_efl_memory_flush_cb(void)
 	elm_cache_all_flush();
 }
 
+#ifdef _APPFW_FEATURE_CAPTURE_FOR_TASK_MANAGER
+static Eina_Bool __appcore_mimiapp_capture_cb(void *data)
+{
+	GSList *iter = NULL;
+	struct win_node *entry = NULL;
+
+	for (iter = g_winnode_list; iter != NULL; iter = g_slist_next(iter)) {
+		entry = iter->data;
+		if(__check_skip(entry->win) == FALSE)
+			break;
+	}
+	if(iter) {
+		entry = iter->data;
+		if(taskmanage) {
+			_capture_and_make_file(entry->win, getpid(), appid);
+		}
+	}
+
+	return ECORE_CALLBACK_CANCEL;
+}
+#endif
+
 static void __do_app(enum app_event event, void *data, bundle * b)
 {
 	int r = -1;
 	struct ui_priv *ui = data;
+	char trm_buf[MAX_PACKAGE_STR_SIZE];
+#ifdef _APPFW_FEATURE_CAPTURE_FOR_TASK_MANAGER
+	const char *miniapp = NULL;
+#endif
 
 	_ret_if(ui == NULL || event >= AE_MAX);
 	_DBG("[APP %d] Event: %s State: %s", _pid, _ae_name[event],
@@ -369,12 +495,43 @@ static void __do_app(enum app_event event, void *data, bundle * b)
 	case AE_RESET:
 		_DBG("[APP %d] RESET", _pid);
 		LOG(LOG_DEBUG, "LAUNCH", "[%s:Application:reset:start]",
-		    ui->name);
+			ui->name);
 		if (ui->ops->reset)
 			r = ui->ops->reset(b, ui->ops->data);
+		LOG(LOG_DEBUG, "LAUNCH", "[%s:Application:reset:done]",	ui->name);
+
+		if(first_launch) {
+			first_launch = 0;
+			is_legacy_lifecycle = aul_get_support_legacy_lifecycle();
+
+			_INFO("Legacy lifecycle: %d", is_legacy_lifecycle);
+			if (!is_legacy_lifecycle) {
+				_INFO("[APP %d] Initial Launching, call the resume_cb", _pid);
+				if (ui->ops->resume)
+					r = ui->ops->resume(ui->ops->data);
+			}
+		} else {
+			_INFO("Legacy lifecycle: %d", is_legacy_lifecycle);
+			if (!is_legacy_lifecycle) {
+				_INFO("[APP %d] App already running, raise the window", _pid);
+				x_raise_win(getpid());
+
+				if (ui->state == AS_PAUSED) {
+					_INFO("[APP %d] Call the resume_cb", _pid);
+					if (ui->ops->resume)
+						r = ui->ops->resume(ui->ops->data);
+				}
+			}
+		}
+
 		ui->state = AS_RUNNING;
-		LOG(LOG_DEBUG, "LAUNCH", "[%s:Application:reset:done]",
-		    ui->name);
+
+#ifdef _APPFW_FEATURE_CAPTURE_FOR_TASK_MANAGER
+		miniapp = bundle_get_val(b, "http://tizen.org/appcontrol/data/miniapp");
+		if(miniapp && strncmp(miniapp, "on", 2) == 0) {
+			ecore_timer_add(0.5, __appcore_mimiapp_capture_cb, NULL);
+		}
+#endif
 		break;
 	case AE_PAUSE:
 		if (ui->state == AS_RUNNING) {
@@ -387,12 +544,13 @@ static void __do_app(enum app_event event, void *data, bundle * b)
 		}
 		/* TODO : rotation stop */
 		//r = appcore_pause_rotation_cb();
-#ifdef WEARABLE_PROFILE
-		proc_group_change_status(PROC_CGROUP_SET_BACKGRD, getpid(), NULL);
-#else
-		_inform_backgrd();
-#endif
 
+		snprintf(trm_buf, MAX_PACKAGE_STR_SIZE, "appinfo_pause:[PID]%d", getpid());
+		__trm_app_info_send_socket(trm_buf);
+#ifdef WEARABLE
+		proc_group_change_status(PROC_CGROUP_SET_BACKGRD, getpid(), NULL);
+#endif
+		//_inform_backgrd();
 		break;
 	case AE_RESUME:
 		LOG(LOG_DEBUG, "LAUNCH", "[%s:Application:resume:start]",
@@ -409,11 +567,22 @@ static void __do_app(enum app_event event, void *data, bundle * b)
 		    ui->name);
 		LOG(LOG_DEBUG, "LAUNCH", "[%s:Application:Launching:done]",
 		    ui->name);
-#ifdef WEARABLE_PROFILE
-		proc_group_change_status(PROC_CGROUP_SET_FOREGRD, getpid(), NULL);
-#else
-		_inform_foregrd();
+
+#ifdef _GATE_TEST_ENABLE
+		if(strncmp(ui->name, "wrt-client", 10) != 0) {
+			LOG(LOG_DEBUG, "GATE-M", "<GATE-M>APP_FULLY_LOADED_%s<GATE-M>", ui->name);
+		}
 #endif
+
+#ifdef WEARABLE
+		proc_group_change_status(PROC_CGROUP_SET_FOREGRD, getpid(), NULL);
+#endif
+		snprintf(trm_buf, MAX_PACKAGE_STR_SIZE,"appinfo_resume:[PID]%d", getpid());
+		__trm_app_info_send_socket(trm_buf);
+#ifdef _APPFW_FEATURE_CPU_BOOST
+		__stop_cpu_boost();
+#endif
+		//_inform_foregrd();
 
 		break;
 	default:
@@ -434,10 +603,10 @@ static bool __check_visible(void)
 	struct win_node *entry = NULL;
 
 	for (iter = g_winnode_list; iter != NULL; iter = g_slist_next(iter)) {
-		entry = iter->data;	
+		entry = iter->data;
 		//_DBG("win : %x obscured : %d\n", entry->win, entry->bfobscured);
 		if(entry->bfobscured == FALSE)
-			return TRUE;		
+			return TRUE;
 	}
 	return FALSE;
 }
@@ -498,7 +667,7 @@ static bool __add_win(unsigned int win)
 		return FALSE;
 
 	t->win = win;
-	t->bfobscured = FALSE;
+	t->bfobscured = TRUE;
 
 	_DBG("[EVENT_TEST][EVENT] __add_win WIN:%x\n", win);
 
@@ -532,9 +701,8 @@ static bool __delete_win(unsigned int win)
 		return 0;
 	}
 
-	g_winnode_list = g_slist_remove_link(g_winnode_list, f);
-
 	free(f->data);
+	g_winnode_list = g_slist_delete_link(g_winnode_list, f);
 
 	return TRUE;
 }
@@ -559,9 +727,8 @@ static bool __update_win(unsigned int win, bool bfobscured)
 		return FALSE;
 	}
 
-	g_winnode_list = g_slist_remove_link(g_winnode_list, f);
-
 	free(f->data);
+	g_winnode_list = g_slist_delete_link(g_winnode_list, f);
 
 	t = calloc(1, sizeof(struct win_node));
 	if (t == NULL)
@@ -571,7 +738,7 @@ static bool __update_win(unsigned int win, bool bfobscured)
 	t->bfobscured = bfobscured;
 
 	g_winnode_list = g_slist_append(g_winnode_list, t);
-	
+
 	return TRUE;
 
 }
@@ -639,6 +806,7 @@ static void __set_wm_rotation_support(unsigned int win, unsigned int set)
 }
 
 Ecore_X_Atom atom_parent;
+Ecore_X_Atom xsend_Atom;
 
 static Eina_Bool __show_cb(void *data, int type, void *event)
 {
@@ -681,17 +849,19 @@ static Eina_Bool __hide_cb(void *data, int type, void *event)
 
 	if (__exist_win((unsigned int)ev->win)) {
 		__delete_win((unsigned int)ev->win);
-		
+
 		bvisibility = __check_visible();
-		if (!bvisibility && b_active == 1) {
+		if (!bvisibility && b_active != 0) {
 			_DBG(" Go to Pasue state \n");
 			b_active = 0;
 			__do_app(AE_PAUSE, data, NULL);
+#ifdef _APPFW_FEATURE_CAPTURE_FOR_TASK_MANAGER
 			if(taskmanage) {
 				_capture_and_make_file(ev->win, getpid(), appid);
 			} else if ( aul_is_subapp() ) {
 				_capture_and_make_file(ev->win, getpid(), appcore_get_caller_appid());
 			}
+#endif
 		}
 	}
 
@@ -702,27 +872,39 @@ static Eina_Bool __visibility_cb(void *data, int type, void *event)
 {
 	Ecore_X_Event_Window_Visibility_Change *ev;
 	int bvisibility = 0;
+#ifdef _APPFW_FEATURE_VISIBILITY_CHECK_BY_LCD_STATUS
+	int lcd_status = 0;
+#endif
 
 	ev = event;
 
 	__update_win((unsigned int)ev->win, ev->fully_obscured);
 	bvisibility = __check_visible();
 
-	if (bvisibility && b_active == 0) {
+	_DBG("bvisibility %d, b_active %d", bvisibility, b_active);
+
+	if (bvisibility && b_active != 1) {
 		_DBG(" Go to Resume state\n");
 		b_active = 1;
 
+#ifdef _APPFW_FEATURE_VISIBILITY_CHECK_BY_LCD_STATUS
+		vconf_get_int(VCONFKEY_PM_STATE, &lcd_status);
+		if(lcd_status == VCONFKEY_PM_STATE_LCDOFF) {
+			return ECORE_CALLBACK_RENEW;
+		}
+#endif
 		__do_app(AE_RESUME, data, NULL);
-
-	} else if (!bvisibility && b_active == 1) {
+	} else if (!bvisibility && (b_active != 0)) {
 		_DBG(" Go to Pasue state \n");
 		b_active = 0;
 		__do_app(AE_PAUSE, data, NULL);
+#ifdef _APPFW_FEATURE_CAPTURE_FOR_TASK_MANAGER
 		if(taskmanage) {
 			_capture_and_make_file(ev->win, getpid(), appid);
 		} else if ( aul_is_subapp() ) {
 			_capture_and_make_file(ev->win, getpid(), appcore_get_caller_appid());
 		}
+#endif
 	} else
 		_DBG(" No change state \n");
 
@@ -735,6 +917,14 @@ static Eina_Bool __cmsg_cb(void *data, int type, void *event)
 {
 	struct ui_priv *ui = (struct ui_priv *)data;
 	Ecore_X_Event_Client_Message *e = event;
+
+#ifdef _APPFW_FEATURE_CAPTURE_FOR_TASK_MANAGER
+	if (e->message_type == xsend_Atom) {
+		_DBG("_E_ILLUME_ATOM_APPCORE_RECAPTURE_REQUEST win(%x)", e->win);
+		_capture_and_make_file(e->win, getpid(), appid);
+		return ECORE_CALLBACK_PASS_ON;
+	}
+#endif
 
 	if (!ui) return ECORE_CALLBACK_PASS_ON;
 	if (e->format != 32) return ECORE_CALLBACK_PASS_ON;
@@ -758,7 +948,7 @@ static Eina_Bool __cmsg_cb(void *data, int type, void *event)
 		ui->rot_mode = rm;
 
 		if (APPCORE_RM_UNKNOWN != rm) {
-			ui->rot_cb(rm, ui->rot_cb_data);
+			ui->rot_cb((void *)&rm, rm, ui->rot_cb_data);
 		}
 	}
 
@@ -773,21 +963,27 @@ static void __add_climsg_cb(struct ui_priv *ui)
 	if (!atom_parent)
 	{
 		// Do Error Handling
+		_ERR("atom_parent is NULL");
+	}
+	xsend_Atom = ecore_x_atom_get("_E_ILLUME_ATOM_APPCORE_RECAPTURE_REQUEST");
+	if (!xsend_Atom)
+	{
+		// Do Error Handling
+		_ERR("xsend_Atom is NULL");
 	}
 
-	ui->hshow =
-	    ecore_event_handler_add(ECORE_X_EVENT_WINDOW_SHOW, __show_cb, ui);
-	ui->hhide =
-	    ecore_event_handler_add(ECORE_X_EVENT_WINDOW_HIDE, __hide_cb, ui);
-	ui->hvchange =
-	    ecore_event_handler_add(ECORE_X_EVENT_WINDOW_VISIBILITY_CHANGE,
-				    __visibility_cb, ui);
+	ui->hshow = ecore_event_handler_add(ECORE_X_EVENT_WINDOW_SHOW, __show_cb, ui);
+	ui->hhide = ecore_event_handler_add(ECORE_X_EVENT_WINDOW_HIDE, __hide_cb, ui);
+	ui->hvchange = ecore_event_handler_add(ECORE_X_EVENT_WINDOW_VISIBILITY_CHANGE, __visibility_cb, ui);
+
+#ifdef _APPFW_FEATURE_CAPTURE_FOR_TASK_MANAGER
+	ui->hcmsg = ecore_event_handler_add(ECORE_X_EVENT_CLIENT_MESSAGE, __cmsg_cb, ui);
+#endif
 
 	/* Add client message callback for WM_ROTATE */
 	if(!__check_wm_rotation_support())
 	{
-		ui->hcmsg =
-			ecore_event_handler_add(ECORE_X_EVENT_CLIENT_MESSAGE, __cmsg_cb, ui);
+		//ui->hcmsg = ecore_event_handler_add(ECORE_X_EVENT_CLIENT_MESSAGE, __cmsg_cb, ui);
 		ui->wm_rot_supported = 1;
 		appcore_set_wm_rotation(&wm_rotate);
 	}
@@ -820,7 +1016,7 @@ static int __before_loop(struct ui_priv *ui, int *argc, char ***argv)
 	} else {
 		_DBG("elm_config_preferred_engine_set is not called");
 	}
-
+#ifdef _APPFW_FEATURE_CAPTURE_FOR_TASK_MANAGER
 	tm_tmp = getenv("TASKMANAGE");
 	if(tm_tmp == NULL) {
 		_DBG("taskmanage is null");
@@ -832,7 +1028,7 @@ static int __before_loop(struct ui_priv *ui, int *argc, char ***argv)
 		_DBG("taskmanage is true %s", tm_tmp);
 		taskmanage = 1;
 	}
-
+#endif
 	r = appcore_init(ui->name, &efl_ops, *argc, *argv);
 	_retv_if(r == -1, -1);
 
@@ -860,6 +1056,12 @@ static void __after_loop(struct ui_priv *ui)
 	appcore_unset_rotation_cb();
 	appcore_exit();
 
+	if (ui->state == AS_RUNNING) {
+		_DBG("[APP %d] PAUSE before termination", _pid);
+		if (ui->ops && ui->ops->pause)
+			ui->ops->pause(ui->ops->data);
+	}
+
 	if (ui->ops && ui->ops->terminate)
 		ui->ops->terminate(ui->ops->data);
 
@@ -873,6 +1075,12 @@ static void __after_loop(struct ui_priv *ui)
 	__appcore_timer_del(ui);
 
 	elm_shutdown();
+
+#ifdef _GATE_TEST_ENABLE
+	if((ui->name) && (strncmp(ui->name, "wrt-client", 10) != 0)) {
+		LOG(LOG_DEBUG, "GATE-M", "<GATE-M>APP_CLOSED_%s<GATE-M>", ui->name);
+	}
+#endif
 }
 
 static int __set_data(struct ui_priv *ui, const char *name,
@@ -924,7 +1132,7 @@ static void __unset_data(struct ui_priv *ui)
 }
 
 /* WM_ROTATE */
-static int __wm_set_rotation_cb(int (*cb) (enum appcore_rm, void *), void *data)
+static int __wm_set_rotation_cb(int (*cb) (void *event_info, enum appcore_rm, void *), void *data)
 {
 	if (cb == NULL) {
 		errno = EINVAL;
@@ -997,6 +1205,7 @@ static struct ui_wm_rotate wm_rotate = {
 	__wm_resume_rotation_cb
 };
 
+#ifdef _APPFW_FEATURE_CAPTURE_FOR_TASK_MANAGER
 static Window _get_parent_window(Window id)
 {
 	Window root;
@@ -1175,7 +1384,7 @@ static void _rotate_img(Evas_Object *image_object, int angle, int cx, int cy)
 }
 
 #define EXTENSION_LEN 128
-#define CAPTURE_FILE_PATH "/opt/share/app_capture"
+#define CAPTURE_FILE_PATH "/opt/usr/share/app_capture"
 bool _make_capture_file(const char *package, int width, int height, char *img, int angle)
 {
 	int len;
@@ -1185,6 +1394,7 @@ bool _make_capture_file(const char *package, int width, int height, char *img, i
 	int canvas_width, canvas_height;
 	int cx = 0, cy = 0;
 	int mx = 0;
+	int r = 0;
 
 	_retv_if(NULL == package, false);
 
@@ -1234,7 +1444,8 @@ bool _make_capture_file(const char *package, int width, int height, char *img, i
 	evas_object_show(image_object);
 
 	if (access(CAPTURE_FILE_PATH, F_OK) != 0) {
-		mkdir(CAPTURE_FILE_PATH, 0777);
+		r = mkdir(CAPTURE_FILE_PATH, 0777);
+		goto_if(r < 0, error);
 	}
 	goto_if(false == virtual_canvas_flush_to_file(e, filename, canvas_width, canvas_height), error);
 
@@ -1305,7 +1516,6 @@ int __resize8888(const char* pDataIn, char* pDataOut, int inWidth, int inHeight,
 	return 0;
 }
 
-
 static void _capture_and_make_file(Ecore_X_Window win, int pid, const char *package)
 {
 	Visual *visual;
@@ -1344,7 +1554,9 @@ static void _capture_and_make_file(Ecore_X_Window win, int pid, const char *pack
 
 	free(img);
 }
+#endif
 
+extern int aul_status_update(int status);
 
 EXPORT_API int appcore_efl_main(const char *name, int *argc, char ***argv,
 				struct appcore_ops *ops)
@@ -1353,12 +1565,14 @@ EXPORT_API int appcore_efl_main(const char *name, int *argc, char ***argv,
 	GSList *iter = NULL;
 	struct win_node *entry = NULL;
 	int pid;
-	int ret;
 
 	LOG(LOG_DEBUG, "LAUNCH", "[%s:Application:main:done]", name);
 
 	pid = getpid();
-	aul_app_get_appid_bypid(pid, appid, APPID_MAX);
+	r = aul_app_get_appid_bypid(pid, appid, APPID_MAX);
+	if( r < 0) {
+		_ERR("aul_app_get_appid_bypid fail");
+	}
 
 	r = __set_data(&priv, name, ops);
 	_retv_if(r == -1, -1);
@@ -1373,6 +1587,7 @@ EXPORT_API int appcore_efl_main(const char *name, int *argc, char ***argv,
 
 	aul_status_update(STATUS_DYING);
 
+#ifdef _APPFW_FEATURE_CAPTURE_FOR_TASK_MANAGER
 	for (iter = g_winnode_list; iter != NULL; iter = g_slist_next(iter)) {
 		entry = iter->data;
 		if(__check_skip(entry->win) == FALSE)
@@ -1384,6 +1599,7 @@ EXPORT_API int appcore_efl_main(const char *name, int *argc, char ***argv,
 			_capture_and_make_file(entry->win, pid, appid);
 		}
 	}
+#endif
 
 	__after_loop(&priv);
 
@@ -1405,3 +1621,50 @@ EXPORT_API int appcore_set_app_state(int state)
 
 	return 0;
 }
+
+EXPORT_API int appcore_efl_goto_pause()
+{
+	_DBG(" Go to Pasue state \n");
+	b_active = 0;
+	__do_app(AE_PAUSE, &priv, NULL);
+
+	return 0;
+}
+
+EXPORT_API int appcore_set_prelaunching(bool value)
+{
+	prelaunching = value;
+
+	return 0;
+}
+
+#ifdef _APPFW_FEATURE_PROCESS_POOL
+EXPORT_API int appcore_set_preinit_window_name(const char* win_name)
+{
+	int ret = -1;
+	void *preinit_window = NULL;
+
+	if(!win_name) {
+		_ERR("invalid input param");
+		return -1;
+	}
+
+	preinit_window = aul_get_preinit_window(win_name);
+	if(!preinit_window) {
+		_ERR("no preinit window");
+		return -1;
+	}
+
+	const Evas *e = evas_object_evas_get((const Evas_Object *)preinit_window);
+	if(e) {
+		Ecore_Evas *ee = ecore_evas_ecore_evas_get(e);
+		if(ee) {
+			ecore_evas_name_class_set(ee, win_name, win_name);
+			_DBG("name class set success : %s", win_name);
+			ret = 0;
+		}
+	}
+
+	return ret;
+}
+#endif

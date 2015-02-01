@@ -1,9 +1,7 @@
-
 Name:       app-core
 Summary:    Application basic
-Version:    1.3.11
+Version:    1.3.40
 Release:    1
-VCS:        framework/appfw/app-core#app-core_1.2-47-52-ge28693cc5d9eabf1943bc165ba686d9336334e6c
 Group:      TO_BE/FILLED_IN
 License:    Apache License, Version 2.0
 Source0:    app-core-%{version}.tar.gz
@@ -19,16 +17,17 @@ BuildRequires:  pkgconfig(xext)
 BuildRequires:  pkgconfig(elementary)
 BuildRequires:  pkgconfig(ecore)
 BuildRequires:  pkgconfig(ecore-x)
+BuildRequires:  pkgconfig(ecore-evas)
+BuildRequires:  pkgconfig(evas)
 BuildRequires:  pkgconfig(edje)
 BuildRequires:  pkgconfig(eet)
 BuildRequires:  pkgconfig(eina)
 BuildRequires:  pkgconfig(gobject-2.0)
 BuildRequires:  pkgconfig(glib-2.0)
-%if %{_repository} == "wearable"
+BuildRequires:  cmake
+%if "%{?tizen_profile_name}" == "wearable"
 BuildRequires:  pkgconfig(system-resource)
 %endif
-BuildRequires:  cmake
-
 
 %description
 SLP common application basic
@@ -70,6 +69,7 @@ Requires:   pkgconfig(sensor)
 Requires:   pkgconfig(vconf)
 Requires:   pkgconfig(elementary)
 Requires:   pkgconfig(aul)
+Requires:   pkgconfig(x11)
 
 %description common-devel
 Application basics common (devel)
@@ -82,19 +82,29 @@ Group:      Development/Libraries
 Application basics template
 
 
+%define appfw_feature_visibility_check_by_lcd_status 1
 %prep
-%setup -q 
+%setup -q
 
 %build
-%if 0%{?sec_build_binary_debug_enable}
-export CFLAGS="$CFLAGS -DTIZEN_ENGINEER_MODE"
-export CXXFLAGS="$CXXFLAGS -DTIZEN_ENGINEER_MODE"
-export FFLAGS="$FFLAGS -DTIZEN_ENGINEER_MODE"
+export CFLAGS="$CFLAGS -DTIZEN_DEBUG_ENABLE"
+export CXXFLAGS="$CXXFLAGS -DTIZEN_DEBUG_ENABLE"
+export FFLAGS="$FFLAGS -DTIZEN_DEBUG_ENABLE"
+%if 0%{?appfw_feature_visibility_check_by_lcd_status}
+export CFLAGS="$CFLAGS -D_APPFW_FEATURE_VISIBILITY_CHECK_BY_LCD_STATUS"
+#_APPFW_FEATURE_VISIBILITY_CHECK_BY_LCD_STATUS=ON
 %endif
-%if %{_repository} == "wearable"
-cmake -DDEVICE_PROFILE=wearable -DCMAKE_INSTALL_PREFIX=%{_prefix} -DENABLE_GTK=OFF .
-%else
-cmake -DDEVICE_PROFILE=mobile -DCMAKE_INSTALL_PREFIX=%{_prefix} -DENABLE_GTK=OFF .
+
+#export CFLAGS="$CFLAGS -Wall -Werror -Wno-unused-function"
+cmake -DCMAKE_INSTALL_PREFIX=%{_prefix} -DENABLE_GTK=OFF \
+	-D_APPFW_FEATURE_PROCESS_POOL:BOOL=ON \
+	-D_APPFW_FEATURE_VISIBILITY_CHECK_BY_LCD_STATUS:BOOL=${_APPFW_FEATURE_VISIBILITY_CHECK_BY_LCD_STATUS} \
+	.
+
+%if "%{?tizen_profile_name}" == "wearable"
+export CFLAGS="$CFLAGS -DWEARABLE"
+%elseif "%{?tizen_profile_name}" == "mobile"
+export CFLAGS="$CFLAGS -DMOBILE"
 %endif
 
 make %{?jobs:-j%jobs}
@@ -112,10 +122,10 @@ cp LICENSE %{buildroot}/usr/share/license/%{name}-common
 %post efl
 
 /sbin/ldconfig
-mkdir -p /opt/share/app_capture
-chmod 777 /opt/share/app_capture
-chsmack -a "system::homedir" /opt/share/app_capture
-chsmack -t /opt/share/app_capture
+mkdir -p /opt/usr/share/app_capture
+chmod 777 /opt/usr/share/app_capture
+chsmack -a "system::homedir" /opt/usr/share/app_capture
+chsmack -t /opt/usr/share/app_capture
 
 %postun efl -p /sbin/ldconfig
 

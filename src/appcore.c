@@ -92,6 +92,10 @@ static struct open_s open;
 static int __app_terminate(void *data);
 static int __app_resume(void *data);
 static int __app_reset(void *data, bundle *k);
+#ifdef _APPFW_FEATURE_VISIBILITY_CHECK_BY_LCD_STATUS
+static int __app_resume_lcd_on(void *data);
+static int __app_pause_lcd_off(void *data);
+#endif
 
 static int __sys_lowmem_post(void *data, void *evt);
 static int __sys_lowmem(void *data, void *evt);
@@ -136,7 +140,7 @@ static struct evt_ops evtops[] = {
 
 static int __get_dir_name(char *dirname)
 {
-	char pkg_name[PKGNAME_MAX];
+	char pkgid[PKGNAME_MAX];
 	int r;
 	int pid;
 
@@ -144,14 +148,14 @@ static int __get_dir_name(char *dirname)
 	if (pid < 0)
 		return -1;
 
-	if (aul_app_get_pkgname_bypid(pid, pkg_name, PKGNAME_MAX) != AUL_R_OK)
+	if (aul_app_get_pkgid_bypid(pid, pkgid, PKGNAME_MAX) != AUL_R_OK)
 		return -1;
 
-	r = snprintf(dirname, PATH_MAX, PATH_APP_ROOT "/%s" PATH_RES PATH_LOCALE,pkg_name);
+	r = snprintf(dirname, PATH_MAX, PATH_APP_ROOT "/%s" PATH_RES PATH_LOCALE,pkgid);
 	if (r < 0)
 		return -1;
 	if (access(dirname, R_OK) == 0) return 0;
-	r = snprintf(dirname, PATH_MAX, PATH_RO_APP_ROOT "/%s" PATH_RES PATH_LOCALE,pkg_name);
+	r = snprintf(dirname, PATH_MAX, PATH_RO_APP_ROOT "/%s" PATH_RES PATH_LOCALE,pkgid);
 	if (r < 0)
 		return -1;
 
@@ -200,6 +204,22 @@ static int __app_resume(void *data)
 	return 0;
 }
 
+#ifdef _APPFW_FEATURE_VISIBILITY_CHECK_BY_LCD_STATUS
+static int __app_resume_lcd_on(void *data)
+{
+	struct appcore *ac = data;
+	ac->ops->cb_app(AE_RESUME, ac->ops->data, NULL);
+	return 0;
+}
+
+static int __app_pause_lcd_off(void *data)
+{
+	struct appcore *ac = data;
+	ac->ops->cb_app(AE_PAUSE, ac->ops->data, NULL);
+	return 0;
+}
+#endif
+
 static int __sys_do_default(struct appcore *ac, enum sys_event event)
 {
 	int r;
@@ -217,7 +237,7 @@ static int __sys_do_default(struct appcore *ac, enum sys_event event)
 	return r;
 }
 
-static int __sys_do(struct appcore *ac, enum sys_event event)
+static int __sys_do(struct appcore *ac, void *event_info, enum sys_event event)
 {
 	struct sys_op *op;
 
@@ -228,7 +248,7 @@ static int __sys_do(struct appcore *ac, enum sys_event event)
 	if (op->func == NULL)
 		return __sys_do_default(ac, event);
 
-	return op->func(op->data);
+	return op->func(event_info, op->data);
 }
 
 static int __sys_lowmem_post(void *data, void *evt)
@@ -257,7 +277,7 @@ static int __sys_lowmem(void *data, void *evt)
 	val = vconf_keynode_get_int(key);
 
 	if (val >= VCONFKEY_SYSMAN_LOW_MEMORY_SOFT_WARNING)
-		return __sys_do(data, SE_LOWMEM);
+		return __sys_do(data, (void *)&val, SE_LOWMEM);
 
 	return 0;
 }
@@ -271,7 +291,7 @@ static int __sys_lowbatt(void *data, void *evt)
 
 	/* VCONFKEY_SYSMAN_BAT_CRITICAL_LOW or VCONFKEY_SYSMAN_POWER_OFF */
 	if (val <= VCONFKEY_SYSMAN_BAT_CRITICAL_LOW)
-		return __sys_do(data, SE_LOWBAT);
+		return __sys_do(data, (void *)&val, SE_LOWBAT);
 
 	return 0;
 }
@@ -284,7 +304,12 @@ static int __sys_langchg_pre(void *data, void *evt)
 
 static int __sys_langchg(void *data, void *evt)
 {
-	return __sys_do(data, SE_LANGCHG);
+	keynode_t *key = evt;
+	char *val;
+
+	val = vconf_keynode_get_str(key);
+
+	return __sys_do(data, (void *)val, SE_LANGCHG);
 }
 
 static int __sys_regionchg_pre(void *data, void *evt)
@@ -295,7 +320,15 @@ static int __sys_regionchg_pre(void *data, void *evt)
 
 static int __sys_regionchg(void *data, void *evt)
 {
-	return __sys_do(data, SE_REGIONCHG);
+	keynode_t *key = evt;
+	char *val = NULL;
+	const char *name;
+
+	name = vconf_keynode_get_name(key);
+	if (!strcmp(name, VCONFKEY_REGIONFORMAT))
+		val = vconf_keynode_get_str(key);
+
+	return __sys_do(data, (void *)val, SE_REGIONCHG);
 }
 
 static void __vconf_do(struct evt_ops *eo, keynode_t * key, void *data)
@@ -383,7 +416,7 @@ static int __del_vconf(void)
 static int __aul_handler(aul_type type, bundle *b, void *data)
 {
 	int ret;
-	char *str = NULL;
+	const char *str = NULL;
 
 	switch (type) {
 	case AUL_START:
@@ -410,6 +443,16 @@ static int __aul_handler(aul_type type, bundle *b, void *data)
 		_DBG("[APP %d]     AUL event: AUL_TERMINATE", _pid);
 		__app_terminate(data);
 		break;
+#ifdef _APPFW_FEATURE_VISIBILITY_CHECK_BY_LCD_STATUS
+	case AUL_RESUME_LCD_ON:
+		_DBG("[APP %d]     AUL event: AUL_RESUME_LCD_ON", _pid);
+		__app_resume_lcd_on(data);
+		break;
+	case AUL_PAUSE_LCD_OFF:
+		_DBG("[APP %d]     AUL event: AUL_PAUSE_LCD_OFF", _pid);
+		__app_pause_lcd_off(data);
+		break;
+#endif
 	default:
 		_DBG("[APP %d]     AUL event: %d", _pid, type);
 		/* do nothing */
@@ -440,7 +483,7 @@ EXPORT_API int appcore_set_open_cb(int (*cb) (void *),
 }
 
 EXPORT_API int appcore_set_event_callback(enum appcore_event event,
-					  int (*cb) (void *), void *data)
+					  int (*cb) (void *, void *), void *data)
 {
 	struct appcore *ac = &core;
 	struct sys_op *op;
@@ -486,6 +529,7 @@ EXPORT_API int appcore_init(const char *name, const struct ui_ops *ops,
 	}
 
 	r = __get_dir_name(dirname);
+	SECURE_LOGD("dir : %s", dirname);
 	r = set_i18n(name, dirname);
 	_retv_if(r == -1, -1);
 

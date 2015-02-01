@@ -61,7 +61,7 @@ extern "C" {
  * To develop an application using EFL on this platform.
  *
  * @par Method of function operation:
- * Initialize the EFL, internationalization, and notifications 
+ * Initialize the EFL, internationalization, and notifications
  * for receiving system events such as rotation, low battery, etc.\n
  * And, start an ecore mainloop.
  *
@@ -157,6 +157,14 @@ int _create(void *data)
  *
  */
 int appcore_set_system_resource_reclaiming(bool enable);
+
+int appcore_efl_goto_pause();
+
+int appcore_set_prelaunching(bool value);
+
+#ifdef _APPFW_FEATURE_PROCESS_POOL
+int appcore_set_preinit_window_name(const char* win_name);
+#endif
 
 #ifdef __cplusplus
 }

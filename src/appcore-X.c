@@ -129,7 +129,7 @@ static int __raise_win(Display *d, Window win)
 	return 0;
 }
 
-int x_raise_win(pid_t pid)
+EXPORT_API int x_raise_win(pid_t pid)
 {
 
 	int r;
@@ -152,7 +152,6 @@ int x_raise_win(pid_t pid)
 	_retv_if(d == NULL, -1);
 
 	win = XDefaultRootWindow(d);
-
 	if (!a_pid)
 		a_pid = XInternAtom(d, "_NET_WM_PID", True);
 
