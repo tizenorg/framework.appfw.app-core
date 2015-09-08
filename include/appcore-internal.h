@@ -24,7 +24,7 @@
 #ifndef __APPCORE_INTERNAL_H__
 #define __APPCORE_INTERNAL_H__
 
-#define LOG_TAG "Appcore"
+#define LOG_TAG "APP_CORE"
 
 #include <stdio.h>
 #include <dlog.h>
@@ -35,28 +35,9 @@
 #  define EXPORT_API __attribute__ ((visibility("default")))
 #endif
 
-#ifndef _DLOG_H_
-#  define _ERR(fmt, arg...) \
-	do { fprintf(stderr, "appcore: "fmt"\n", ##arg); } while (0)
-
-#  define _INFO(fmt, arg...) \
-	do { fprintf(stdout, fmt"\n", ##arg); } while (0)
-
-#  define _DBG(fmt, arg...) \
-	do { \
-		if (getenv("APPCORE_DEBUG")) { \
-			fprintf(stdout,	fmt"\n", ##arg); \
-		} \
-	} while (0)
-#else
-#  define _ERR(fmt, arg...) \
-	do { \
-		fprintf(stderr, "appcore: "fmt"\n", ##arg); \
-		LOGE(fmt, ##arg); \
-	} while (0)
+#  define _ERR(fmt, arg...) LOGE(fmt, ##arg)
 #  define _INFO(...) LOGI(__VA_ARGS__)
 #  define _DBG(...) LOGD(__VA_ARGS__)
-#endif
 
 #define _warn_if(expr, fmt, arg...) do { \
 		if (expr) { \
@@ -89,6 +70,27 @@
 			return (val); \
 		} \
 	} while (0)
+
+#define goto_if(expr, val) do { \
+			if(expr) { \
+				_ERR("(%s) -> goto", #expr); \
+				goto val; \
+			} \
+		} while (0)
+
+#define break_if(expr) { \
+			if(expr) { \
+				_ERR("(%s) -> break", #expr); \
+				break; \
+			} \
+		}
+
+#define continue_if(expr) { \
+			if(expr) { \
+				_ERR("(%s) -> continue", #expr); \
+				continue; \
+			} \
+		}
 
 /**
  * Appcore internal state
@@ -132,7 +134,7 @@ enum sys_event {
  * Appcore system event operation
  */
 struct sys_op {
-	int (*func) (void *);
+	int (*func) (void *, void *);
 	void *data;
 };
 
@@ -169,9 +171,19 @@ extern int x_raise_win(pid_t pid);
 int appcore_pause_rotation_cb(void);
 int appcore_resume_rotation_cb(void);
 
+struct ui_wm_rotate {
+   int (*set_rotation_cb) (int (*cb) (void *event_info, enum appcore_rm, void *), void *data);
+   int (*unset_rotation_cb) (void);
+   int (*get_rotation_state) (enum appcore_rm *curr);
+   int (*pause_rotation_cb) (void);
+   int (*resume_rotation_cb) (void);
+};
+int appcore_set_wm_rotation(struct ui_wm_rotate* wm_rotate);
 
 #define ENV_START "APP_START_TIME"
 
 #define MEMORY_FLUSH_ACTIVATE
+
+#define APPID_MAX 256
 
 #endif				/* __APPCORE_INTERNAL_H__ */

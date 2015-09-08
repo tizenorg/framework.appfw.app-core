@@ -31,10 +31,18 @@ SET(HEADERS_common appcore-common.h)
 
 INCLUDE(FindPkgConfig)
 #pkg_check_modules(pkg_common REQUIRED pmapi vconf sensor aul rua dlog x11)
-pkg_check_modules(pkg_common REQUIRED vconf sensor aul dlog x11 ecore-x)
+pkg_check_modules(pkg_common REQUIRED vconf sensor aul dlog x11 ecore-x )
 FOREACH(flag ${pkg_common_CFLAGS})
 	SET(EXTRA_CFLAGS_common "${EXTRA_CFLAGS_common} ${flag}")
 ENDFOREACH(flag)
+
+IF(_APPFW_FEATURE_PROCESS_POOL)
+	ADD_DEFINITIONS("-D_APPFW_FEATURE_PROCESS_POOL")
+ENDIF(_APPFW_FEATURE_PROCESS_POOL)
+
+IF(_APPFW_FEATURE_VISIBILITY_CHECK_BY_LCD_STATUS)
+        ADD_DEFINITIONS("-D_APPFW_FEATURE_VISIBILITY_CHECK_BY_LCD_STATUS")
+ENDIF(_APPFW_FEATURE_VISIBILITY_CHECK_BY_LCD_STATUS)
 
 ADD_LIBRARY(${APPCORE_COMMON} SHARED ${SRCS_common})
 SET_TARGET_PROPERTIES(${APPCORE_COMMON} PROPERTIES SOVERSION ${VERSION_MAJOR})
@@ -55,11 +63,12 @@ INSTALL(FILES ${CMAKE_CURRENT_SOURCE_DIR}/include/SLP_Appcore_PG.h DESTINATION i
 # Build appcore-efl Library
 # ------------------------------
 SET(APPCORE_EFL "appcore-efl")
-SET(SRCS_efl src/appcore-efl.c)
+SET(SRCS_efl src/appcore-efl.c src/virtual_canvas.c)
+
 SET(HEADERS_efl appcore-efl.h)
 
 INCLUDE(FindPkgConfig)
-pkg_check_modules(pkg_efl REQUIRED elementary dlog sysman ecore ecore-x gobject-2.0 glib-2.0)
+pkg_check_modules(pkg_efl REQUIRED elementary dlog ecore ecore-x gobject-2.0 glib-2.0 x11 xcomposite ecore-evas ecore-input aul evas vconf)
 FOREACH(flag ${pkg_efl_CFLAGS})
 	SET(EXTRA_CFLAGS_efl "${EXTRA_CFLAGS_efl} ${flag}")
 ENDFOREACH(flag)

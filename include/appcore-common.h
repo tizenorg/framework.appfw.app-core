@@ -52,7 +52,9 @@
 extern "C" {
 #endif
 
+#ifndef _
 #define _(str) gettext(str)  /**< gettext alias */
+#endif
 #define gettext_noop(str) (str)	/**< keyword for xgettext
 				  to extract translatable strings */
 #define N_(str) gettext_noop(str)  /**< gettext_noop alias */
@@ -201,7 +203,7 @@ int add_callbacks(struct appdata *data)
  *
  */
 int appcore_set_event_callback(enum appcore_event event,
-		int (*cb)(void *), void *data);
+		int (*cb)(void *, void *), void *data);
 
 /**
  * @par Description:
@@ -255,7 +257,7 @@ static int _rot_cb(enum appcore_rm, void *);
  * @endcode
  *
  */
-int appcore_set_rotation_cb(int (*cb) (enum appcore_rm, void *),
+int appcore_set_rotation_cb(int (*cb) (void *event_info, enum appcore_rm, void *),
 			    void *data);
 
 /**
@@ -705,6 +707,7 @@ static int _open_cb(enum appcore_rm, void *);
  */
 int appcore_set_open_cb(int (*cb) (void *), void *data);
 
+char *appcore_get_caller_appid(void);
 
 #ifdef __cplusplus
 }
