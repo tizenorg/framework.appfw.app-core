@@ -24,15 +24,17 @@ BuildRequires:  pkgconfig(eet)
 BuildRequires:  pkgconfig(eina)
 BuildRequires:  pkgconfig(gobject-2.0)
 BuildRequires:  pkgconfig(glib-2.0)
+BuildRequires:  pkgconfig(pkgmgr-info)
+BuildRequires:  pkgconfig(ttrace)
+BuildRequires:  pkgconfig(iniparser)
+BuildRequires:  pkgconfig(dbus-glib-1)
 BuildRequires:  cmake
-%if "%{?tizen_profile_name}" == "wearable"
-BuildRequires:  pkgconfig(system-resource)
-%endif
 
 %description
 SLP common application basic
 
-
+%define appfw_feature_process_pool 1
+%define appfw_feature_capture_snapshot 0
 
 %package efl
 Summary:    App basic EFL
@@ -81,8 +83,26 @@ Group:      Development/Libraries
 %description template
 Application basics template
 
-
+%if "%{?tizen_profile_name}" == "wearable"
 %define appfw_feature_visibility_check_by_lcd_status 1
+%define appfw_feature_sensor_auto_rotation 1
+%define appfw_feature_background_management 1
+%else
+%if "%{?tizen_profile_name}" == "mobile"
+%define appfw_feature_visibility_check_by_lcd_status 1
+%define appfw_feature_sensor_auto_rotation 1
+%define appfw_feature_background_management 1
+%else
+%if "%{?tizen_profile_name}" == "tv"
+%define appfw_feature_visibility_check_by_lcd_status 0
+%define appfw_feature_sensor_auto_rotation 0
+%define appfw_feature_background_management 0
+%endif
+%endif
+%endif
+
+%define appfw_feature_expansion_pkg_install 1
+
 %prep
 %setup -q
 
@@ -91,20 +111,40 @@ export CFLAGS="$CFLAGS -DTIZEN_DEBUG_ENABLE"
 export CXXFLAGS="$CXXFLAGS -DTIZEN_DEBUG_ENABLE"
 export FFLAGS="$FFLAGS -DTIZEN_DEBUG_ENABLE"
 %if 0%{?appfw_feature_visibility_check_by_lcd_status}
-export CFLAGS="$CFLAGS -D_APPFW_FEATURE_VISIBILITY_CHECK_BY_LCD_STATUS"
-#_APPFW_FEATURE_VISIBILITY_CHECK_BY_LCD_STATUS=ON
+_APPFW_FEATURE_VISIBILITY_CHECK_BY_LCD_STATUS=ON
+%endif
+%if 0%{?appfw_feature_process_pool}
+_APPFW_FEATURE_PROCESS_POOL=ON
+%endif
+%if 0%{?appfw_feature_capture_snapshot}
+_APPFW_FEATURE_CAPTURE_FOR_TASK_MANAGER=ON
+%endif
+%if 0%{?appfw_feature_expansion_pkg_install}
+_APPFW_FEATURE_EXPANSION_PKG_INSTALL=ON
+%endif
+%if 0%{?appfw_feature_sensor_auto_rotation}
+_APPFW_FEATURE_SENSOR_AUTO_ROTATION=ON
+%endif
+%if 0%{?appfw_feature_background_management}
+_APPFW_FEATURE_BACKGROUND_MANAGEMENT=ON
 %endif
 
 #export CFLAGS="$CFLAGS -Wall -Werror -Wno-unused-function"
 cmake -DCMAKE_INSTALL_PREFIX=%{_prefix} -DENABLE_GTK=OFF \
-	-D_APPFW_FEATURE_PROCESS_POOL:BOOL=ON \
+	-D_APPFW_FEATURE_PROCESS_POOL:BOOL=${_APPFW_FEATURE_PROCESS_POOL} \
+	-D_APPFW_FEATURE_CAPTURE_FOR_TASK_MANAGER:BOOL=${_APPFW_FEATURE_CAPTURE_FOR_TASK_MANAGER} \
+	-D_APPFW_FEATURE_EXPANSION_PKG_INSTALL:BOOL=${_APPFW_FEATURE_EXPANSION_PKG_INSTALL} \
 	-D_APPFW_FEATURE_VISIBILITY_CHECK_BY_LCD_STATUS:BOOL=${_APPFW_FEATURE_VISIBILITY_CHECK_BY_LCD_STATUS} \
+	-D_APPFW_FEATURE_SENSOR_AUTO_ROTATION:BOOL=${_APPFW_FEATURE_SENSOR_AUTO_ROTATION} \
+	-D_APPFW_FEATURE_BACKGROUND_MANAGEMENT:BOOL=${_APPFW_FEATURE_BACKGROUND_MANAGEMENT} \
 	.
 
 %if "%{?tizen_profile_name}" == "wearable"
 export CFLAGS="$CFLAGS -DWEARABLE"
-%elseif "%{?tizen_profile_name}" == "mobile"
+%else
+%if "%{?tizen_profile_name}" == "mobile"
 export CFLAGS="$CFLAGS -DMOBILE"
+%endif
 %endif
 
 make %{?jobs:-j%jobs}

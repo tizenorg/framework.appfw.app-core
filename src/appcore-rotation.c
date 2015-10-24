@@ -23,16 +23,15 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <unistd.h>
-
-#include <sensor_internal_deprecated.h>
-//#include <sensor_auto_rotation.h>
-
 #include <vconf.h>
 #include <Ecore_X.h>
 #include <Ecore.h>
 #include <X11/Xlib.h>
 
 #include "appcore-internal.h"
+
+#ifdef _APPFW_FEATURE_SENSOR_AUTO_ROTATION
+#include <sensor_internal_deprecated.h>
 
 #define _MAKE_ATOM(a, s)                              \
    do {                                               \
@@ -106,7 +105,6 @@ static void __changed_cb(unsigned int event_type, sensor_event_data_t *event,
 {
 	int *cb_event_data;
 	enum appcore_rm m;
-	int ret;
 
 	if (rot.lock)
 		return;
@@ -184,10 +182,12 @@ static void __del_rotlock(void)
 	vconf_ignore_key_changed(VCONFKEY_SETAPPL_AUTO_ROTATE_SCREEN_BOOL, __lock_cb);
 	rot.lock = 0;
 }
+#endif
 
 EXPORT_API int appcore_set_rotation_cb(int (*cb) (void *event_info, enum appcore_rm, void *),
 				       void *data)
 {
+#ifdef _APPFW_FEATURE_SENSOR_AUTO_ROTATION
 	if (rot.wm_rotate) {
 		return rot.wm_rotate->set_rotation_cb(cb, data);
 	} else {
@@ -245,11 +245,13 @@ EXPORT_API int appcore_set_rotation_cb(int (*cb) (void *event_info, enum appcore
 		root =  ecore_x_window_root_first_get();
 		XSelectInput(ecore_x_display_get(), root, PropertyChangeMask);
 	}
+#endif
 	return 0;
 }
 
 EXPORT_API int appcore_unset_rotation_cb(void)
 {
+#ifdef _APPFW_FEATURE_SENSOR_AUTO_ROTATION
 	if (rot.wm_rotate) {
 		return rot.wm_rotate->unset_rotation_cb();
 	}
@@ -288,11 +290,13 @@ EXPORT_API int appcore_unset_rotation_cb(void)
 		}
 		rot.handle = -1;
 	}
+#endif
 	return 0;
 }
 
 EXPORT_API int appcore_get_rotation_state(enum appcore_rm *curr)
 {
+#ifdef _APPFW_FEATURE_SENSOR_AUTO_ROTATION
 	if (rot.wm_rotate) {
 		return rot.wm_rotate->get_rotation_state(curr);
 	}
@@ -317,11 +321,13 @@ EXPORT_API int appcore_get_rotation_state(enum appcore_rm *curr)
 
 		*curr = __get_mode(event);
 	}
+#endif
 	return 0;
 }
 
 EXPORT_API int appcore_pause_rotation_cb(void)
 {
+#ifdef _APPFW_FEATURE_SENSOR_AUTO_ROTATION
 	if (rot.wm_rotate) {
 		return rot.wm_rotate->pause_rotation_cb();
 	}
@@ -353,12 +359,13 @@ EXPORT_API int appcore_pause_rotation_cb(void)
 			rot.sf_started = 0;
 		}
 	}
-
+#endif
 	return 0;
 }
 
 EXPORT_API int appcore_resume_rotation_cb(void)
 {
+#ifdef _APPFW_FEATURE_SENSOR_AUTO_ROTATION
 	if (rot.wm_rotate) {
 		return rot.wm_rotate->resume_rotation_cb();
 	}
@@ -404,11 +411,13 @@ EXPORT_API int appcore_resume_rotation_cb(void)
 			rot.mode = m;
 		}
 	}
+#endif
 	return 0;
 }
 
 EXPORT_API int appcore_set_wm_rotation(struct ui_wm_rotate* wm_rotate)
 {
+#ifdef _APPFW_FEATURE_SENSOR_AUTO_ROTATION
 	if (!wm_rotate) return -1;
 
 	if (rot.callback) {
@@ -417,5 +426,6 @@ EXPORT_API int appcore_set_wm_rotation(struct ui_wm_rotate* wm_rotate)
 	}
 	rot.wm_rotate = wm_rotate;
 	_DBG("[APP %d] Support wm rotate:%p", getpid(), wm_rotate);
+#endif
 	return 0;
 }

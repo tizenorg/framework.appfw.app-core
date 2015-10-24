@@ -79,14 +79,14 @@ static bool _flush_data_to_file(Evas *e, char *data, const char *filename, int w
 
 	if (evas_object_image_save(output, filename, NULL, QUALITY_N_COMPRESS) == EINA_FALSE) {
 		evas_object_del(output);
-		_DBG("Faild to save a captured image (%s)\n", filename);
+		SECURE_LOGD("Faild to save a captured image (%s)\n", filename);
 		return false;
 	}
 
 	evas_object_del(output);
 
 	if (access(filename, F_OK) != 0) {
-		_DBG("File %s is not found\n", filename);
+		SECURE_LOGD("File %s is not found\n", filename);
 		return false;
 	}
 

@@ -28,6 +28,7 @@
 
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
+#include <Ecore.h>
 
 #include "appcore-internal.h"
 
@@ -103,6 +104,58 @@ static int __find_win(Display *d, Window *win, pid_t pid)
 	return 0;
 }
 
+static void __add_win_list(Eina_List **list, Window *win)
+{
+	void *w;
+	Eina_List *l;
+
+	if (!list || !win)
+		return;
+
+	EINA_LIST_FOREACH(*list, l, w) {
+		if ((Window)w == *win)
+			return;
+	}
+
+	*list = eina_list_append(*list, (void *)*win);
+}
+
+static void __foreach_win(Eina_List **list, Display *d, Window *win, pid_t pid)
+{
+	int i;
+	int r;
+	pid_t p;
+	unsigned int n;
+	Window root, parent, *child;
+
+	p = __get_win_pid(d, *win);
+	if (p == pid)
+		__add_win_list(list, win);
+
+	r = XQueryTree(d, *win, &root, &parent, &child, &n);
+	if (r) {
+		for (i = 0; i < n; i++) {
+			__foreach_win(list, d, &child[i], pid);
+		}
+		XFree(child);
+	}
+}
+
+static int __iconify_win(Eina_List *list, Display *d)
+{
+	void *w;
+	Eina_List *l;
+
+	if (!list || !d)
+		return -1;
+
+	EINA_LIST_FOREACH(list, l, w) {
+		XIconifyWindow(d, (Window)w, 0);
+	}
+
+	return 0;
+}
+
 static int __raise_win(Display *d, Window win)
 {
 	XEvent xev;
@@ -165,6 +218,42 @@ EXPORT_API int x_raise_win(pid_t pid)
 	r = __raise_win(d, win);
 
 	XCloseDisplay(d);
+
+	return r;
+}
+
+int x_pause_win(pid_t pid)
+{
+	int r;
+	Display *d;
+	Window win;
+	Eina_List *list_win = NULL;
+
+	if (pid < 1) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	r = kill(pid, 0);
+	if (r == -1) {
+		errno = ESRCH;
+		return -1;
+	}
+
+	d = XOpenDisplay(NULL);
+	_retv_if(d == NULL, -1);
+
+	win = XDefaultRootWindow(d);
+	if (!a_pid)
+		a_pid = XInternAtom(d, "_NET_WM_PID", True);
+
+	__foreach_win(&list_win, d, &win, pid);
+	r = __iconify_win(list_win, d);
+
+	XCloseDisplay(d);
+
+	if (list_win)
+		eina_list_free(list_win);
 
 	return r;
 }

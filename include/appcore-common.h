@@ -65,15 +65,17 @@ extern "C" {
  */
 enum appcore_event {
 	APPCORE_EVENT_UNKNOWN,
-		       /**< Unknown event */
+			/**< Unknown event */
 	APPCORE_EVENT_LOW_MEMORY,
-			  /**< Low memory */
+			/**< Low memory */
 	APPCORE_EVENT_LOW_BATTERY,
-			   /**< Low battery */
+			/**< Low battery */
 	APPCORE_EVENT_LANG_CHANGE,
-			   /**< Language setting is changed */
+			/**< Language setting is changed */
 	APPCORE_EVENT_REGION_CHANGE,
-			     /**< Region setting is changed */
+			/**< Region setting is changed */
+	APPCORE_EVENT_SUSPENDED_STATE_CHANGE,
+			/**< The suspended state is changed */
 };
 
 /**
@@ -101,6 +103,12 @@ enum appcore_time_format {
 	APPCORE_TIME_FORMAT_UNKNOWN,
 	APPCORE_TIME_FORMAT_12,
 	APPCORE_TIME_FORMAT_24,
+};
+
+
+enum appcore_suspended_state {
+	APPCORE_SUSPENDED_STATE_WILL_ENTER_SUSPEND = 0,
+	APPCORE_SUSPENDED_STATE_DID_EXIT_FROM_SUSPEND
 };
 
 /**
@@ -136,10 +144,10 @@ struct appcore_ops {
  *
  * @par Typical use case:
  * To do something when predefined events (enum appcore_event) occur, use this API
- * 
+ *
  * @par Method of function operation:
  * Using Heynoti subscription, Vconf changed callback, and AUL, Appcore invokes the registered callback function.
- * 
+ *
  * @par Important notes:
  * Only one callback function can be set. If <I>cb</I> is NULL, unset the callback function about the event.\n
  * Default behavior is performed when the specified event callback doesn't have registered.
@@ -148,7 +156,7 @@ struct appcore_ops {
  * @param[in] cb callback function
  * @param[in] data callback function data
  *
- * @return 0 on success, -1 on error (<I>errno</I> set) 
+ * @return 0 on success, -1 on error (<I>errno</I> set)
  *
  * @par Errors:
  * EINVAL - Invalid event type
@@ -214,18 +222,18 @@ int appcore_set_event_callback(enum appcore_event event,
  *
  * @par Typical use case:
  * To do something when the rotation mode is changed, use this API
- * 
+ *
  * @par Method of function operation:
  * Appcore receives rotation change from Sensor framework. When Appcore receive the change, it invokes the registered callback function.
- * 
+ *
  * @par Important notes:
  * Locks the rotation mode, the registered callback is not invoked.
  *
  * @param[in] cb callback function
  * @param[in] data callback function data
  *
- * @return 0 on success, -1 on error (<I>errno</I> set) 
- * 
+ * @return 0 on success, -1 on error (<I>errno</I> set)
+ *
  * @par Errors:
  * EINVAL - <I>cb</I> is NULL
  * EALREADY - rotation callback function already registered
@@ -268,7 +276,7 @@ int appcore_set_rotation_cb(int (*cb) (void *event_info, enum appcore_rm, void *
  * This function unsets a callback function for rotation events.
  *
  * @return 0 on success, -1 on error
- * 
+ *
  * @pre Callback is set by appcore_set_rotation_cb().
  * @post None.
  * @see appcore_set_rotation_cb(), appcore_get_rotation_state()
@@ -305,12 +313,12 @@ int appcore_unset_rotation_cb(void);
  *
  * @par Method of function operation:
  * This function gets the current rotation mode from Sensor framework.
- * 
+ *
  * @param[out] curr current rotation mode\n
  * If Sensor framework is not working, curr is set to APPCORE_RM_UNKNOWN.
  *
- * @return 0 on success, -1 on error (<I>errno</I> set) 
- * 
+ * @return 0 on success, -1 on error (<I>errno</I> set)
+ *
  * @par Errors:
  * EINVAL - <I>curr</I> is NULL
  *
@@ -330,7 +338,7 @@ int appcore_unset_rotation_cb(void);
 	enum appcore_rm curr;
 
 	...
-	
+
 	r = appcore_get_rotation_state(&curr);
 	if (r == -1) {
 		// add exception handling
@@ -351,12 +359,12 @@ int appcore_get_rotation_state(enum appcore_rm *curr);
  *
  * @par Method of function operation:
  * This function gets the current time format from vconf.
- * 
+ *
  * @param[out] timeformat current time format\n
  * If vconf is not working, timeformat is set to APPCORE_TIME_FORMAT_UNKNOWN.
  *
- * @return 0 on success, -1 on error (<I>errno</I> set) 
- * 
+ * @return 0 on success, -1 on error (<I>errno</I> set)
+ *
  * @par Errors:
  * EINVAL - <I>timeformat</I> is NULL
  *
@@ -376,7 +384,7 @@ int appcore_get_rotation_state(enum appcore_rm *curr);
 	enum appcore_time_format timeformat;
 
 	...
-	
+
 	r = appcore_get_timeformat(&timeformat);
 	if (r == -1) {
 		// add exception handling
@@ -390,6 +398,51 @@ int appcore_get_timeformat(enum appcore_time_format *timeformat);
 
 /**
  * @par Description:
+ * Gets the localized translation.
+ *
+ * @par Purpose:
+ * To get the localized translation string, use this API.
+ *
+ * @par Method of function operation:
+ * This function gets the translation string from localization file(.po file).
+ *
+ * @param[in] message id for string to be translated\n
+ *
+ * @return The localized translation for the given message on success,
+ *			otherwise the given message
+ * 			The resulting string is statically allocated and must not be modified or freed.
+ * @par Errors:
+ * EINVAL - <I>msgid</I> is NULL
+ *
+ * @pre None.
+ * @post None.
+ * @see None.
+ * @remarks None.
+ *
+ * @par Sample code:
+ * @code
+#include <appcore-common.h>
+
+...
+
+{
+	char *str;
+
+	...
+
+	str = appcore_get_i18n_text("IDS_STRING");
+	if (str == "IDS_STRING") {
+		// add exception handling
+	}
+	...
+}
+ * @endcode
+ *
+ */
+char *appcore_get_i18n_text(const char *msgid);
+
+/**
+ * @par Description:
  * Set the information for the internationalization.
  *
  * @par Purpose:
@@ -397,18 +450,18 @@ int appcore_get_timeformat(enum appcore_time_format *timeformat);
  *
  * @par Typical use case:
  * This function provides convenience for using gettext.
- * 
+ *
  * @par Method of function operation:
  * Calls setlocale(), bindtextdomain() and textdomain() internally.
- * 
+ *
  * @par Corner cases/exceptions:
  * If <I>dirname</I> is NULL, the previously set base directory is used. Typically, it is /usr/share/locale.
  *
  * @param[in] domainname a message domain name(text domain name) \n Must be a non-empty string.
- * @param[in] dirname the base directory for message catalogs belonging to the specified domain \n 
+ * @param[in] dirname the base directory for message catalogs belonging to the specified domain \n
  *
- * @return 0 on success, -1 on error (<I>errno</I> set) 
- * 
+ * @return 0 on success, -1 on error (<I>errno</I> set)
+ *
  * @par Errors:
  * EINVAL - <I>domain</I> is NULL
  *
@@ -430,7 +483,7 @@ int appcore_get_timeformat(enum appcore_time_format *timeformat);
 
 	r = appcore_set_i18n("i18n_example", NULL);
 	if (r == -1) {
-		// add exception handling	
+		// add exception handling
 	}
 	...
 }
@@ -441,18 +494,18 @@ int appcore_set_i18n(const char *domainname, const char *dirname);
 
 /**
  * @par Description:
- * Set the measuring start time 
+ * Set the measuring start time
  *
  * @par Purpose:
  * To measure the time, the start time should be set. This function set the start point.
  *
  * @par Typical use case:
  * It is used to measure the time for doing something. \n
- * This function set the start point. And, appcore_measure_time() returns 
+ * This function set the start point. And, appcore_measure_time() returns
  * the elapsed time from the start point.
  *
  * @see appcore_measure_time()
- * 
+ *
  * @par Method of function operation:
  * Store the current time to the internal variable.
  *
@@ -492,7 +545,7 @@ void appcore_measure_start(void);
  * This function returns the elapsed time from the start point set by appcore_measure_start().
  *
  * @see appcore_measure_start()
- * 
+ *
  * @par Method of function operation:
  * This function subtracts the current time from the start point.
  *
@@ -537,7 +590,7 @@ int appcore_measure_time(void);
  * This function returns the elapsed time from a time specified in environment variable.
  *
  * @see appcore_measure_start()
- * 
+ *
  * @par Method of function operation:
  * This function subtracts the current time from a time specified in environment variable.
  *
@@ -545,7 +598,7 @@ int appcore_measure_time(void);
  * If <I>envnm</I> is NULL, "APP_START_TIME" set by launcher is used.
  * If the environment variable is not set or invalid format, returns 0.
  *
- * @param[in] envnm environment variable name which has 
+ * @param[in] envnm environment variable name which has
  *  the start time (format: "%u %u", seconds, micro seconds)
  *
  * @return Milliseconds from a time specified in environment variable
@@ -563,9 +616,9 @@ int appcore_measure_time(void);
 {
 	...
 
-	// do something 
+	// do something
 
-	printf("it takes %d msec from APP_START\n", 
+	printf("it takes %d msec from APP_START\n",
 		appcore_measure_time_from("APP_START_TIME"));
 	...
 }
@@ -582,7 +635,7 @@ struct ui_ops;
 /**
  * @par Description:
  * Appcore init. Internal use only
- * 
+ *
  * @par Important notes:
  * Except special case, NEVER use this. Use the appcore EFL or GTK instead of this.
  *
@@ -606,10 +659,13 @@ struct ui_ops;
 int appcore_init(const char *name, const struct ui_ops *ops,
 		 int argc, char **argv);
 
+struct appcore;
+void appcore_get_app_core(struct appcore **ac);
+
 /**
  * @par Description:
  * Appcore exit. Internal use only.
- * 
+ *
  * @par Important notes:
  * Except special case, NEVER use this.
  *
@@ -634,9 +690,9 @@ void appcore_exit(void);
  * sqlite3_release_memory() if sqlite3 is used, and malloc_trim(). Also, trims native stack.
  *
  * @par Important notes:
- * Currently, this function is automatically called in the following 2 cases:\n 
+ * Currently, this function is automatically called in the following 2 cases:\n
  * (1) when the application enters into the pause state and\n
- * (2) when low memory event is invoked and the application is on pause.\n 
+ * (2) when low memory event is invoked and the application is on pause.\n
  * Developers can use this function when they want extra memory flush utility.
  *
  * @return 0 on success, -1 on error
@@ -671,8 +727,8 @@ int appcore_flush_memory(void);
 /**
  * @par Description:
  * Set a open callback
- * Only when application is running, if aul_open api is called, then this callback function is called. 
- * If your open_cb function return -1, then appcore doesn't raise window. 
+ * Only when application is running, if aul_open api is called, then this callback function is called.
+ * If your open_cb function return -1, then appcore doesn't raise window.
  *
  * @param[in] cb callback function
  * @param[in] data callback function data

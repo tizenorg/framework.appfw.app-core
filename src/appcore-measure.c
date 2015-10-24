@@ -50,15 +50,18 @@ static int __get_envtime(const char *name, struct timeval *t)
 	int r;
 	char *s;
 
-	s = getenv(name ? : ENV_START);
-	/*_retvm_if(s == NULL, -1, "%s is not set", name);*/
-	_retv_if(s == NULL, -1);
+	s = getenv(name ? name : ENV_START);
+	if (s == NULL) {
+		return -1;
+	}
 
-	r = sscanf(s, "%u/%u", (int *)&t->tv_sec, (int *)&t->tv_usec);
+	r = sscanf((const char *)s, "%u/%u", (int *)&t->tv_sec, (int *)&t->tv_usec);
 	if (r != 2)
-		r = sscanf(s, "%u %u", (int *)&t->tv_sec, (int *)&t->tv_usec);
+		r = sscanf((const char *)s, "%u %u", (int *)&t->tv_sec, (int *)&t->tv_usec);
 
-	_retv_if(r != 2, -1);
+	if (r != 2) {
+		return -1;
+	}
 
 	return 0;
 }

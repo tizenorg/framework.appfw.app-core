@@ -49,12 +49,15 @@
 #include <glib.h>
 #include <stdbool.h>
 #include <aul.h>
+#include <ttrace.h>
 #include "appcore-internal.h"
 #include "appcore-efl.h"
 #include "virtual_canvas.h"
 #ifdef _APPFW_FEATURE_VISIBILITY_CHECK_BY_LCD_STATUS
 #include <vconf/vconf.h>
 #endif
+
+#include <bundle_internal.h>
 
 #define SYSMAN_MAXSTR 100
 #define SYSMAN_MAXARG 16
@@ -97,8 +100,12 @@ struct ui_priv {
 
 	Ecore_Timer *mftimer;	/* Ecore Timer for memory flushing */
 
+	struct appcore *app_core;
 	struct appcore_ops *ops;
+
 	void (*mfcb) (void);	/* Memory Flushing Callback */
+	void (*prepare_to_suspend) (void *data);
+	void (*exit_from_suspend) (void *data);
 
 	/* WM_ROTATE */
 	int wm_rot_supported;
@@ -162,6 +169,7 @@ static inline int send_str(int fd, char *str)
 	return ret;
 }
 
+#if 0
 static int sysnoti_send(struct sysnoti *msg)
 {
 	int client_len;
@@ -219,93 +227,51 @@ static int sysnoti_send(struct sysnoti *msg)
 	close(client_sockfd);
 	return result;
 }
+#endif
 
 void __trm_app_info_send_socket(char *write_buf)
 {
-        const char trm_socket_for_app_info[] = "/dev/socket/app_info";
-        int socket_fd = 0;
-        int ret = 0;
-        struct sockaddr_un addr;
-
-        _DBG("__trm_app_info_send_socket");
-
-        if (access(trm_socket_for_app_info, F_OK) != 0) {
-                _ERR("access");
-                goto trm_end;
-        }
-
-        socket_fd = socket(AF_LOCAL, SOCK_STREAM, 0);
-        if (socket_fd < 0) {
-                _ERR("socket");
-                goto trm_end;
-        }
-
-        memset(&addr, 0, sizeof(addr));
-        sprintf(addr.sun_path, "%s", trm_socket_for_app_info);
-        addr.sun_family = AF_LOCAL;
-
-        ret = connect(socket_fd, (struct sockaddr *) &addr ,sizeof(sa_family_t) + strlen(trm_socket_for_app_info) );
-        if (ret != 0) {
-                close(socket_fd);
-                goto trm_end;
-        }
-
-        send(socket_fd, write_buf, strlen(write_buf), MSG_DONTWAIT | MSG_NOSIGNAL);
-        _DBG("send");
-
-        close(socket_fd);
-trm_end:
-        return;
-}
-
-#ifdef _APPFW_FEATURE_CPU_BOOST
-static void __stop_cpu_boost(void)
-{
-	const char trm_sock_for_cpu_boost[] = "/dev/socket/scenario_info";
-	int sock_fd = 0;
+	const char trm_socket_for_app_info[] = "/dev/socket/app_info";
+	int socket_fd = 0;
 	int ret = 0;
 	struct sockaddr_un addr;
-	const char command[] = "AppLaunchUnlock";
 
-	_DBG("__stop_cpu_boost enter");
+	_DBG("__trm_app_info_send_socket");
 
-	if (access(trm_sock_for_cpu_boost, F_OK) != 0) {
-		_ERR("access() failed, errno: %d (%s)", errno, strerror(errno));
-		goto error;
+	if (access(trm_socket_for_app_info, F_OK) != 0) {
+		_ERR("access");
+		goto trm_end;
 	}
 
-	sock_fd = socket(AF_LOCAL, SOCK_STREAM, 0);
-	if (sock_fd < 0) {
-		_ERR("socket() failed, errno: %d (%s)", errno, strerror(errno));
-		goto error;
+	socket_fd = socket(AF_LOCAL, SOCK_STREAM, 0);
+	if (socket_fd < 0) {
+		_ERR("socket");
+		goto trm_end;
 	}
 
 	memset(&addr, 0, sizeof(addr));
-	sprintf(addr.sun_path, "%s", trm_sock_for_cpu_boost);
+	snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", trm_socket_for_app_info);
 	addr.sun_family = AF_LOCAL;
 
-	ret = connect(sock_fd, (struct sockaddr *) &addr, sizeof(sa_family_t) + strlen(trm_sock_for_cpu_boost));
+	ret = connect(socket_fd, (struct sockaddr *) &addr ,sizeof(sa_family_t) + strlen(trm_socket_for_app_info) );
 	if (ret != 0) {
-		_ERR("connect() failed, errno: %d (%s)", errno, strerror(errno));
-		close(sock_fd);
-		goto error;
+		close(socket_fd);
+		goto trm_end;
 	}
 
-	ret = send(sock_fd, command, strlen(command), MSG_DONTWAIT | MSG_NOSIGNAL);
+	ret = send(socket_fd, write_buf, strlen(write_buf), MSG_DONTWAIT | MSG_NOSIGNAL);
 	if (ret < 0) {
 		_ERR("send() failed, errno: %d (%s)", errno, strerror(errno));
-		close(sock_fd);
-		goto error;
+	} else {
+		_DBG("send");
 	}
 
-	close(sock_fd);
-	_DBG("__stop_cpu_boost ok");
-
-error:
+	close(socket_fd);
+trm_end:
 	return;
 }
-#endif
 
+#if 0
 static int _call_predef_action(const char *type, int num, ...)
 {
 	struct sysnoti *msg;
@@ -359,18 +325,15 @@ static int _inform_backgrd(void)
 	snprintf(buf, sizeof(buf), "%d", getpid());
 	return _call_predef_action(PREDEF_BACKGRD, 1, buf);
 }
-
-
+#endif
 
 char appid[APPID_MAX];
 
 #ifdef _APPFW_FEATURE_CAPTURE_FOR_TASK_MANAGER
 bool taskmanage;
 static void _capture_and_make_file(Ecore_X_Window win, int pid, const char *package);
-#endif
-
 static bool __check_skip(Ecore_X_Window xwin);
-
+#endif
 
 static int WIN_COMP(gconstpointer data1, gconstpointer data2)
 {
@@ -381,13 +344,59 @@ static int WIN_COMP(gconstpointer data1, gconstpointer data2)
 
 GSList *g_winnode_list = NULL;
 
+static void __appcore_efl_prepare_to_suspend(void *data)
+{
+#ifdef _APPFW_FEATURE_BACKGROUND_MANAGEMENT
+	struct ui_priv *ui = (struct ui_priv *)data;
+	struct sys_op *op = NULL;
+	int suspend = APPCORE_SUSPENDED_STATE_WILL_ENTER_SUSPEND;
+
+	if (ui->app_core && !ui->app_core->allowed_bg && !ui->app_core->suspended_state) {
+		op = &ui->app_core->sops[SE_SUSPENDED_STATE];
+		if (op && op->func) {
+			op->func((void *)&suspend, op->data); //calls c-api handler
+		}
+		_appcore_request_to_suspend(getpid()); //send dbus signal to resourced
+		ui->app_core->suspended_state = true;
+	}
+	_DBG("[__SUSPEND__]");
+#endif
+}
+
+static void __appcore_efl_exit_from_suspend(void *data)
+{
+#ifdef _APPFW_FEATURE_BACKGROUND_MANAGEMENT
+	struct ui_priv *ui = (struct ui_priv *)data;
+	struct sys_op *op = NULL;
+	int suspend = APPCORE_SUSPENDED_STATE_DID_EXIT_FROM_SUSPEND;
+
+	if (ui->app_core && !ui->app_core->allowed_bg && ui->app_core->suspended_state) {
+		op = &ui->app_core->sops[SE_SUSPENDED_STATE];
+		if (op && op->func) {
+			op->func((void *)&suspend, op->data); //calls c-api handler
+		}
+		ui->app_core->suspended_state = false;
+	}
+	_DBG("[__SUSPEND__]");
+#endif
+}
+
 #if defined(MEMORY_FLUSH_ACTIVATE)
 static Eina_Bool __appcore_memory_flush_cb(void *data)
 {
+	_DBG("[__SUSPEND__]");
 	struct ui_priv *ui = (struct ui_priv *)data;
 
 	appcore_flush_memory();
-	ui->mftimer = NULL;
+	if (ui)
+		ui->mftimer = NULL;
+
+#ifdef _APPFW_FEATURE_BACKGROUND_MANAGEMENT
+	if (ui && ui->prepare_to_suspend) {
+		_DBG("[__SUSPEND__] flush case");
+		ui->prepare_to_suspend(ui);
+	}
+#endif
 
 	return ECORE_CALLBACK_CANCEL;
 }
@@ -435,6 +444,20 @@ static void __appcore_efl_memory_flush_cb(void)
 }
 
 #ifdef _APPFW_FEATURE_CAPTURE_FOR_TASK_MANAGER
+static int __is_sub_app()
+{
+	static int lpid = -1;
+	int cpid = getpid();
+
+	if (lpid == -1)
+		lpid = aul_app_group_get_leader_pid(cpid);
+
+	if (lpid == cpid)
+		return 0;
+
+	return 1;
+}
+
 static Eina_Bool __appcore_mimiapp_capture_cb(void *data)
 {
 	GSList *iter = NULL;
@@ -447,7 +470,7 @@ static Eina_Bool __appcore_mimiapp_capture_cb(void *data)
 	}
 	if(iter) {
 		entry = iter->data;
-		if(taskmanage) {
+		if (taskmanage || __is_sub_app()) {
 			_capture_and_make_file(entry->win, getpid(), appid);
 		}
 	}
@@ -465,66 +488,70 @@ static void __do_app(enum app_event event, void *data, bundle * b)
 	const char *miniapp = NULL;
 #endif
 
-	_ret_if(ui == NULL || event >= AE_MAX);
-	_DBG("[APP %d] Event: %s State: %s", _pid, _ae_name[event],
-	     _as_name[ui->state]);
+	if (ui == NULL || event >= AE_MAX) {
+		return;
+	}
+
+	_INFO("[APP %d] Event: %s State: %s", _pid, _ae_name[event],
+		_as_name[ui->state]);
 
 	if (event == AE_MEM_FLUSH) {
 		ui->mfcb();
 		return;
 	}
 
-	if (event == AE_LOWMEM_POST) {
-		if (__appcore_low_memory_post_cb(ui) == 0)
+	if ((event == AE_LOWMEM_POST) &&
+		(__appcore_low_memory_post_cb(ui) == 0)) {
 			return;
 	}
 
 	if (!(ui->state == AS_PAUSED && event == AE_PAUSE))
 		__appcore_timer_del(ui);
 
-	if (event == AE_TERMINATE) {
-		_DBG("[APP %d] TERMINATE", _pid);
-		ui->state = AS_DYING;
-		elm_exit();
+	if (ui->state == AS_DYING) {
+		_ERR("Skip the event in dying state");
 		return;
 	}
 
-	_ret_if(ui->ops == NULL);
+	if (event == AE_TERMINATE) {
+		_DBG("[APP %d] TERMINATE", _pid);
+		elm_exit();
+		aul_status_update(STATUS_DYING);
+		return;
+	}
+
+	/* _ret_if(ui->ops == NULL); */
 
 	switch (event) {
 	case AE_RESET:
 		_DBG("[APP %d] RESET", _pid);
 		LOG(LOG_DEBUG, "LAUNCH", "[%s:Application:reset:start]",
 			ui->name);
-		if (ui->ops->reset)
-			r = ui->ops->reset(b, ui->ops->data);
+
+#ifdef _APPFW_FEATURE_BACKGROUND_MANAGEMENT
+		if (ui->exit_from_suspend) {
+			_DBG("[__SUSPEND__] reset case");
+			ui->exit_from_suspend(ui);
+		}
+#endif
+
+		if (ui->ops->reset) {
+			traceBegin(TTRACE_TAG_APPLICATION_MANAGER,
+					"APPCORE:RESET");
+			ui->ops->reset(b, ui->ops->data);
+			traceEnd(TTRACE_TAG_APPLICATION_MANAGER);
+		}
 		LOG(LOG_DEBUG, "LAUNCH", "[%s:Application:reset:done]",	ui->name);
 
-		if(first_launch) {
-			first_launch = 0;
+		if (!first_launch) {
 			is_legacy_lifecycle = aul_get_support_legacy_lifecycle();
-
-			_INFO("Legacy lifecycle: %d", is_legacy_lifecycle);
-			if (!is_legacy_lifecycle) {
-				_INFO("[APP %d] Initial Launching, call the resume_cb", _pid);
-				if (ui->ops->resume)
-					r = ui->ops->resume(ui->ops->data);
-			}
-		} else {
 			_INFO("Legacy lifecycle: %d", is_legacy_lifecycle);
 			if (!is_legacy_lifecycle) {
 				_INFO("[APP %d] App already running, raise the window", _pid);
 				x_raise_win(getpid());
-
-				if (ui->state == AS_PAUSED) {
-					_INFO("[APP %d] Call the resume_cb", _pid);
-					if (ui->ops->resume)
-						r = ui->ops->resume(ui->ops->data);
-				}
 			}
 		}
-
-		ui->state = AS_RUNNING;
+		first_launch = 0;
 
 #ifdef _APPFW_FEATURE_CAPTURE_FOR_TASK_MANAGER
 		miniapp = bundle_get_val(b, "http://tizen.org/appcontrol/data/miniapp");
@@ -536,11 +563,23 @@ static void __do_app(enum app_event event, void *data, bundle * b)
 	case AE_PAUSE:
 		if (ui->state == AS_RUNNING) {
 			_DBG("[APP %d] PAUSE", _pid);
-			if (ui->ops->pause)
+			if (ui->ops->pause) {
+				traceBegin(TTRACE_TAG_APPLICATION_MANAGER,
+						"APPCORE:PAUSE");
 				r = ui->ops->pause(ui->ops->data);
+				traceEnd(TTRACE_TAG_APPLICATION_MANAGER);
+			}
 			ui->state = AS_PAUSED;
-			if(r >= 0 && resource_reclaiming == TRUE)
-				__appcore_timer_add(ui);
+			if (r >= 0) {
+				if (resource_reclaiming == TRUE)
+					__appcore_timer_add(ui);
+#ifdef _APPFW_FEATURE_BACKGROUND_MANAGEMENT
+				else if (resource_reclaiming == FALSE && ui->prepare_to_suspend) {
+					_DBG("[__SUSPEND__] pause case");
+					ui->prepare_to_suspend(ui);
+				}
+#endif
+			}
 		}
 		/* TODO : rotation stop */
 		//r = appcore_pause_rotation_cb();
@@ -550,16 +589,46 @@ static void __do_app(enum app_event event, void *data, bundle * b)
 #ifdef WEARABLE
 		proc_group_change_status(PROC_CGROUP_SET_BACKGRD, getpid(), NULL);
 #endif
+		aul_invoke_status_local_cb(STATUS_BG);
 		//_inform_backgrd();
 		break;
 	case AE_RESUME:
 		LOG(LOG_DEBUG, "LAUNCH", "[%s:Application:resume:start]",
-		    ui->name);
-		if (ui->state == AS_PAUSED) {
+			ui->name);
+
+#ifdef _APPFW_FEATURE_BACKGROUND_MANAGEMENT
+		if (ui->exit_from_suspend) {
+			_DBG("[__SUSPEND__] resume case");
+			ui->exit_from_suspend(ui);
+		}
+#endif
+
+		if (ui->state == AS_PAUSED || ui->state == AS_CREATED) {
 			_DBG("[APP %d] RESUME", _pid);
-			if (ui->ops->resume)
-				r = ui->ops->resume(ui->ops->data);
+
+			if (ui->state == AS_CREATED) {
+				is_legacy_lifecycle = aul_get_support_legacy_lifecycle();
+
+				_INFO("Legacy lifecycle: %d", is_legacy_lifecycle);
+				if (!is_legacy_lifecycle) {
+					_INFO("[APP %d] Initial Launching, call the resume_cb", _pid);
+					if (ui->ops->resume) {
+						traceBegin(TTRACE_TAG_APPLICATION_MANAGER,
+								"APPCORE:RESUME");
+						ui->ops->resume(ui->ops->data);
+						traceEnd(TTRACE_TAG_APPLICATION_MANAGER);
+					}
+				}
+			} else {
+				if (ui->ops->resume) {
+					traceBegin(TTRACE_TAG_APPLICATION_MANAGER,
+						"APPCORE:RESUME");
+					ui->ops->resume(ui->ops->data);
+					traceEnd(TTRACE_TAG_APPLICATION_MANAGER);
+				}
+			}
 			ui->state = AS_RUNNING;
+
 		}
 		/*TODO : rotation start*/
 		//r = appcore_resume_rotation_cb();
@@ -579,11 +648,21 @@ static void __do_app(enum app_event event, void *data, bundle * b)
 #endif
 		snprintf(trm_buf, MAX_PACKAGE_STR_SIZE,"appinfo_resume:[PID]%d", getpid());
 		__trm_app_info_send_socket(trm_buf);
-#ifdef _APPFW_FEATURE_CPU_BOOST
-		__stop_cpu_boost();
-#endif
 		//_inform_foregrd();
 
+		aul_invoke_status_local_cb(STATUS_VISIBLE);
+		break;
+	case AE_TERMINATE_BGAPP:
+		if (ui->state == AS_PAUSED) {
+			_DBG("[APP %d] is paused. TERMINATE", _pid);
+                        ui->state = AS_DYING;
+			aul_status_update(STATUS_DYING);
+                        elm_exit();
+		} else if (ui->state == AS_RUNNING) {
+			_DBG("[APP %d] is running.", _pid);
+		} else {
+			_DBG("[APP %d] is another state", _pid);
+		}
 		break;
 	default:
 		/* do nothing */
@@ -611,6 +690,7 @@ static bool __check_visible(void)
 	return FALSE;
 }
 
+#ifdef _APPFW_FEATURE_CAPTURE_FOR_TASK_MANAGER
 static bool __check_skip(Ecore_X_Window xwin)
 {
 	unsigned int i, num;
@@ -640,6 +720,7 @@ static bool __check_skip(Ecore_X_Window xwin)
 	free(state);
 	return FALSE;
 }
+#endif
 
 static bool __exist_win(unsigned int win)
 {
@@ -745,7 +826,9 @@ static bool __update_win(unsigned int win, bool bfobscured)
 
 /* WM_ROTATE */
 static Ecore_X_Atom _WM_WINDOW_ROTATION_SUPPORTED = 0;
+#if 0
 static Ecore_X_Atom _WM_WINDOW_ROTATION_CHANGE_REQUEST = 0;
+#endif
 
 static int __check_wm_rotation_support(void)
 {
@@ -807,6 +890,10 @@ static void __set_wm_rotation_support(unsigned int win, unsigned int set)
 
 Ecore_X_Atom atom_parent;
 Ecore_X_Atom xsend_Atom;
+Ecore_X_Atom win_req_lower;
+#ifdef _APPFW_FEATURE_VISIBILITY_CHECK_BY_LCD_STATUS
+Ecore_X_Atom lcd_Atom;
+#endif
 
 static Eina_Bool __show_cb(void *data, int type, void *event)
 {
@@ -820,10 +907,11 @@ static Eina_Bool __show_cb(void *data, int type, void *event)
 	if (ret != 1)
 	{
 		// This is child window. Skip!!!
+		_ERR(" This is child window. Skip!!! WIN:%x\n", ev->win);
 		return ECORE_CALLBACK_PASS_ON;
 	}
 
-	_DBG("[EVENT_TEST][EVENT] GET SHOW EVENT!!!. WIN:%x\n", ev->win);
+	_WARN("[EVENT_TEST][EVENT] GET SHOW EVENT!!!. WIN:%x\n", ev->win);
 
 	if (!__exist_win((unsigned int)ev->win)) {
 		/* WM_ROTATE */
@@ -833,8 +921,9 @@ static Eina_Bool __show_cb(void *data, int type, void *event)
 		__add_win((unsigned int)ev->win);
 	}
 	else
-		__update_win((unsigned int)ev->win, FALSE);
+		__update_win((unsigned int)ev->win, TRUE);
 
+	appcore_group_attach();
 	return ECORE_CALLBACK_RENEW;
 }
 
@@ -845,7 +934,7 @@ static Eina_Bool __hide_cb(void *data, int type, void *event)
 
 	ev = event;
 
-	_DBG("[EVENT_TEST][EVENT] GET HIDE EVENT!!!. WIN:%x\n", ev->win);
+	_WARN("[EVENT_TEST][EVENT] GET HIDE EVENT!!!. WIN:%x\n", ev->win);
 
 	if (__exist_win((unsigned int)ev->win)) {
 		__delete_win((unsigned int)ev->win);
@@ -856,7 +945,7 @@ static Eina_Bool __hide_cb(void *data, int type, void *event)
 			b_active = 0;
 			__do_app(AE_PAUSE, data, NULL);
 #ifdef _APPFW_FEATURE_CAPTURE_FOR_TASK_MANAGER
-			if(taskmanage) {
+			if (taskmanage || __is_sub_app()) {
 				_capture_and_make_file(ev->win, getpid(), appid);
 			} else if ( aul_is_subapp() ) {
 				_capture_and_make_file(ev->win, getpid(), appcore_get_caller_appid());
@@ -874,6 +963,7 @@ static Eina_Bool __visibility_cb(void *data, int type, void *event)
 	int bvisibility = 0;
 #ifdef _APPFW_FEATURE_VISIBILITY_CHECK_BY_LCD_STATUS
 	int lcd_status = 0;
+	int r = -1;
 #endif
 
 	ev = event;
@@ -888,8 +978,9 @@ static Eina_Bool __visibility_cb(void *data, int type, void *event)
 		b_active = 1;
 
 #ifdef _APPFW_FEATURE_VISIBILITY_CHECK_BY_LCD_STATUS
-		vconf_get_int(VCONFKEY_PM_STATE, &lcd_status);
-		if(lcd_status == VCONFKEY_PM_STATE_LCDOFF) {
+		r = vconf_get_int(VCONFKEY_PM_STATE, &lcd_status);
+		if (r == VCONF_OK && lcd_status == VCONFKEY_PM_STATE_LCDOFF) {
+			_WARN("LCD status is off, skip the AE_RESUME event");
 			return ECORE_CALLBACK_RENEW;
 		}
 #endif
@@ -899,7 +990,7 @@ static Eina_Bool __visibility_cb(void *data, int type, void *event)
 		b_active = 0;
 		__do_app(AE_PAUSE, data, NULL);
 #ifdef _APPFW_FEATURE_CAPTURE_FOR_TASK_MANAGER
-		if(taskmanage) {
+		if (taskmanage || __is_sub_app()) {
 			_capture_and_make_file(ev->win, getpid(), appid);
 		} else if ( aul_is_subapp() ) {
 			_capture_and_make_file(ev->win, getpid(), appcore_get_caller_appid());
@@ -912,11 +1003,16 @@ static Eina_Bool __visibility_cb(void *data, int type, void *event)
 
 }
 
-/* WM_ROTATE */
 static Eina_Bool __cmsg_cb(void *data, int type, void *event)
 {
-	struct ui_priv *ui = (struct ui_priv *)data;
 	Ecore_X_Event_Client_Message *e = event;
+
+	if (e->message_type == win_req_lower) {
+		_DBG("win_req_lower");
+
+		appcore_group_lower();
+		return ECORE_CALLBACK_PASS_ON;
+	}
 
 #ifdef _APPFW_FEATURE_CAPTURE_FOR_TASK_MANAGER
 	if (e->message_type == xsend_Atom) {
@@ -925,33 +1021,22 @@ static Eina_Bool __cmsg_cb(void *data, int type, void *event)
 		return ECORE_CALLBACK_PASS_ON;
 	}
 #endif
-
-	if (!ui) return ECORE_CALLBACK_PASS_ON;
-	if (e->format != 32) return ECORE_CALLBACK_PASS_ON;
-	if (e->message_type == _WM_WINDOW_ROTATION_CHANGE_REQUEST) {
-		if ((0 == ui->wm_rot_supported) ||
-			(0 == ui->rot_started) ||
-			(NULL == ui->rot_cb)) {
-			return ECORE_CALLBACK_PASS_ON;
+#ifdef _APPFW_FEATURE_VISIBILITY_CHECK_BY_LCD_STATUS
+	if (e->message_type == lcd_Atom) {
+		if (e->data.l[0] == 1) {
+			_WARN("LCD On. Resume the topmost app");
+			__do_app(AE_RESUME, data, NULL);
 		}
-
-		enum appcore_rm rm;
-		switch (e->data.l[1])
-		{
-			case   0: rm = APPCORE_RM_PORTRAIT_NORMAL;   break;
-			case  90: rm = APPCORE_RM_LANDSCAPE_REVERSE; break;
-			case 180: rm = APPCORE_RM_PORTRAIT_REVERSE;  break;
-			case 270: rm = APPCORE_RM_LANDSCAPE_NORMAL;  break;
-			default:  rm = APPCORE_RM_UNKNOWN;           break;
+		else if (e->data.l[0] == 0) {
+			_WARN("LCD Off. Pause the topmost app");
+			__do_app(AE_PAUSE, data, NULL);
 		}
-
-		ui->rot_mode = rm;
-
-		if (APPCORE_RM_UNKNOWN != rm) {
-			ui->rot_cb((void *)&rm, rm, ui->rot_cb_data);
+		else {
+			_ERR("Invalid value.");
 		}
+		return ECORE_CALLBACK_PASS_ON;
 	}
-
+#endif
 	return ECORE_CALLBACK_PASS_ON;
 }
 
@@ -971,19 +1056,31 @@ static void __add_climsg_cb(struct ui_priv *ui)
 		// Do Error Handling
 		_ERR("xsend_Atom is NULL");
 	}
+#ifdef _APPFW_FEATURE_VISIBILITY_CHECK_BY_LCD_STATUS
+	lcd_Atom =  ecore_x_atom_get("_SEND_EVENT_TO_WINDOW_BY_LCD_ON_OFF_");
+	if (!lcd_Atom)
+	{
+		// Do Error Handling
+		_ERR("lcd_Atom is NULL");
+	}
+#endif
+
+	win_req_lower = ecore_x_atom_get("_E_ILLUME_ATOM_WIN_REQ_LOWER");
+	if (!win_req_lower)
+	{
+		// Do Error Handling
+		_ERR("win_req_lower is NULL");
+
+	}
 
 	ui->hshow = ecore_event_handler_add(ECORE_X_EVENT_WINDOW_SHOW, __show_cb, ui);
 	ui->hhide = ecore_event_handler_add(ECORE_X_EVENT_WINDOW_HIDE, __hide_cb, ui);
 	ui->hvchange = ecore_event_handler_add(ECORE_X_EVENT_WINDOW_VISIBILITY_CHANGE, __visibility_cb, ui);
-
-#ifdef _APPFW_FEATURE_CAPTURE_FOR_TASK_MANAGER
 	ui->hcmsg = ecore_event_handler_add(ECORE_X_EVENT_CLIENT_MESSAGE, __cmsg_cb, ui);
-#endif
 
 	/* Add client message callback for WM_ROTATE */
 	if(!__check_wm_rotation_support())
 	{
-		//ui->hcmsg = ecore_event_handler_add(ECORE_X_EVENT_CLIENT_MESSAGE, __cmsg_cb, ui);
 		ui->wm_rot_supported = 1;
 		appcore_set_wm_rotation(&wm_rotate);
 	}
@@ -993,7 +1090,7 @@ static int __before_loop(struct ui_priv *ui, int *argc, char ***argv)
 {
 	int r;
 	char *hwacc = NULL;
-	char *tm_tmp = NULL;
+	struct appcore *ac = NULL;
 
 	if (argc == NULL || argv == NULL) {
 		_ERR("argc/argv is NULL");
@@ -1001,27 +1098,26 @@ static int __before_loop(struct ui_priv *ui, int *argc, char ***argv)
 		return -1;
 	}
 
+#if !(GLIB_CHECK_VERSION(2, 36, 0))
 	g_type_init();
+#endif
 	elm_init(*argc, *argv);
 
 	hwacc = getenv("HWACC");
-	if(hwacc == NULL) {
-		_DBG("elm_config_preferred_engine_set is not called");
-	} else if(strcmp(hwacc, "USE") == 0) {
-		elm_config_preferred_engine_set("opengl_x11");
-		_DBG("elm_config_preferred_engine_set : opengl_x11");
-	} else if(strcmp(hwacc, "NOT_USE") == 0) {
-		elm_config_preferred_engine_set("software_x11");
-		_DBG("elm_config_preferred_engine_set : software_x11");
+	if(hwacc && strcmp(hwacc, "USE") == 0) {
+		elm_config_accel_preference_set("hw");
+		_DBG("elm_config_accel_preference_set : hw");
+	} else if(hwacc && strcmp(hwacc, "NOT_USE") == 0) {
+		elm_config_accel_preference_set("none");
+		_DBG("elm_config_accel_preference_set :  none");
 	} else {
 		_DBG("elm_config_preferred_engine_set is not called");
 	}
 #ifdef _APPFW_FEATURE_CAPTURE_FOR_TASK_MANAGER
+	char *tm_tmp = NULL;
+
 	tm_tmp = getenv("TASKMANAGE");
-	if(tm_tmp == NULL) {
-		_DBG("taskmanage is null");
-		taskmanage = 1;
-	} else if(strcmp(tm_tmp, "false") == 0) {
+	if(tm_tmp && strcmp(tm_tmp, "false") == 0) {
 		_DBG("taskmanage is false");
 		taskmanage = 0;
 	} else {
@@ -1029,17 +1125,28 @@ static int __before_loop(struct ui_priv *ui, int *argc, char ***argv)
 		taskmanage = 1;
 	}
 #endif
+
 	r = appcore_init(ui->name, &efl_ops, *argc, *argv);
 	_retv_if(r == -1, -1);
 
+	appcore_get_app_core(&ac);
+	ui->app_core = ac;
+	SECURE_LOGD("[__SUSPEND__] appcore initialized, appcore addr: 0x%x", ac);
+
 	LOG(LOG_DEBUG, "LAUNCH", "[%s:Platform:appcore_init:done]", ui->name);
 	if (ui->ops && ui->ops->create) {
+		traceBegin(TTRACE_TAG_APPLICATION_MANAGER, "APPCORE:CREATE");
 		r = ui->ops->create(ui->ops->data);
+		traceEnd(TTRACE_TAG_APPLICATION_MANAGER);
 		if (r < 0) {
 			_ERR("create() return error");
 			appcore_exit();
-			if (ui->ops && ui->ops->terminate)
+			if (ui->ops && ui->ops->terminate) {
+				traceBegin(TTRACE_TAG_APPLICATION_MANAGER,
+						"APPCORE:TERMINATE");
 				ui->ops->terminate(ui->ops->data);
+				traceEnd(TTRACE_TAG_APPLICATION_MANAGER);
+			}
 			errno = ECANCELED;
 			return -1;
 		}
@@ -1060,12 +1167,21 @@ static void __after_loop(struct ui_priv *ui)
 
 	if (ui->state == AS_RUNNING) {
 		_DBG("[APP %d] PAUSE before termination", _pid);
-		if (ui->ops && ui->ops->pause)
+		if (ui->ops && ui->ops->pause) {
+			traceBegin(TTRACE_TAG_APPLICATION_MANAGER,
+					"APPCORE:PAUSE");
 			ui->ops->pause(ui->ops->data);
+			traceEnd(TTRACE_TAG_APPLICATION_MANAGER);
+		}
 	}
 
-	if (ui->ops && ui->ops->terminate)
+	if (ui->ops && ui->ops->terminate) {
+		traceBegin(TTRACE_TAG_APPLICATION_MANAGER, "APPCORE:TERMINATE");
 		ui->ops->terminate(ui->ops->data);
+		traceEnd(TTRACE_TAG_APPLICATION_MANAGER);
+	}
+
+	ui->state = AS_DYING;
 
 	if (ui->hshow)
 		ecore_event_handler_del(ui->hshow);
@@ -1076,7 +1192,9 @@ static void __after_loop(struct ui_priv *ui)
 
 	__appcore_timer_del(ui);
 
-	elm_shutdown();
+	// Check the process-pool case
+	if (elm_shutdown() > 0)
+		elm_shutdown();
 
 #ifdef _GATE_TEST_ENABLE
 	if((ui->name) && (strncmp(ui->name, "wrt-client", 10) != 0)) {
@@ -1121,6 +1239,10 @@ static int __set_data(struct ui_priv *ui, const char *name,
 	ui->rot_cb = NULL;
 	ui->rot_cb_data = NULL;
 	ui->rot_mode = APPCORE_RM_UNKNOWN;
+
+	ui->app_core = NULL;
+	ui->prepare_to_suspend = __appcore_efl_prepare_to_suspend;
+	ui->exit_from_suspend = __appcore_efl_exit_from_suspend;
 
 	return 0;
 }
@@ -1331,11 +1453,9 @@ static char *_capture_window(Window id, Visual *visual, int width, int height, i
 }
 
 #define _WND_REQUEST_ANGLE_IDX 0
-#define _WND_CURR_ANGLE_IDX    1
 int _get_angle(Ecore_X_Window win)
 {
 	int after = -1;
-	int before = -1;
 
 	do {
 		int ret, count;
@@ -1359,7 +1479,6 @@ int _get_angle(Ecore_X_Window win)
 		}
 
 		after= angle[_WND_REQUEST_ANGLE_IDX];
-		before = angle[_WND_CURR_ANGLE_IDX];
 	} while (0);
 
 	if (-1 == after) after = 0;
@@ -1397,13 +1516,19 @@ bool _make_capture_file(const char *package, int width, int height, char *img, i
 	int cx = 0, cy = 0;
 	int mx = 0;
 	int r = 0;
+	char idbuf[APPID_MAX] = { 0, };
 
 	_retv_if(NULL == package, false);
+	int lpid = aul_app_group_get_leader_pid(getpid());
 
-	len = strlen(package) + EXTENSION_LEN;
+	_retv_if(lpid < 0, false);
+	if ( AUL_R_OK != aul_app_get_appid_bypid(lpid, idbuf, APPID_MAX - 1))
+		return false;
+
+	len = strlen(idbuf) + EXTENSION_LEN;
 	filename = malloc(len);
 	_retv_if(NULL == filename, false);
-	snprintf(filename, len, CAPTURE_FILE_PATH"/%s.jpg", package);
+	snprintf(filename, len, CAPTURE_FILE_PATH"/%s.jpg", idbuf);
 
 	if (90 == angle || 270 == angle) {
 		canvas_width = height;
@@ -1558,14 +1683,10 @@ static void _capture_and_make_file(Ecore_X_Window win, int pid, const char *pack
 }
 #endif
 
-extern int aul_status_update(int status);
-
 EXPORT_API int appcore_efl_main(const char *name, int *argc, char ***argv,
 				struct appcore_ops *ops)
 {
 	int r;
-	GSList *iter = NULL;
-	struct win_node *entry = NULL;
 	int pid;
 
 	LOG(LOG_DEBUG, "LAUNCH", "[%s:Application:main:done]", name);
@@ -1590,14 +1711,17 @@ EXPORT_API int appcore_efl_main(const char *name, int *argc, char ***argv,
 	aul_status_update(STATUS_DYING);
 
 #ifdef _APPFW_FEATURE_CAPTURE_FOR_TASK_MANAGER
+	GSList *iter = NULL;
+	struct win_node *entry = NULL;
+
 	for (iter = g_winnode_list; iter != NULL; iter = g_slist_next(iter)) {
 		entry = iter->data;
 		if(__check_skip(entry->win) == FALSE)
 			break;
 	}
-	if(iter) {
+	if (iter) {
 		entry = iter->data;
-		if(taskmanage) {
+		if (taskmanage || __is_sub_app()) {
 			_capture_and_make_file(entry->win, pid, appid);
 		}
 	}
@@ -1670,3 +1794,14 @@ EXPORT_API int appcore_set_preinit_window_name(const char* win_name)
 	return ret;
 }
 #endif
+
+EXPORT_API unsigned int appcore_get_main_window()
+{
+	struct win_node *entry = NULL;
+
+	if (g_winnode_list != NULL) {
+		entry = g_winnode_list->data;
+		return (unsigned int) entry->win;
+	}
+	return 0;
+}

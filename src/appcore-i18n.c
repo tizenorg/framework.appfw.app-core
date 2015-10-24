@@ -26,10 +26,28 @@
 #include <errno.h>
 
 #include <vconf.h>
+#include <iniparser.h>
 
 #include "appcore-internal.h"
 
 static int _set;
+static char* current_lang = NULL;
+
+static void __load_lang_info_for_fallback_translated_msg(char *lang)
+{
+	if(!lang) {
+		_ERR("lang value is null");
+		return;
+	}
+
+	if(current_lang) {
+		free(current_lang);
+		current_lang = NULL;
+	}
+	current_lang = strdup(lang);
+
+	return;
+}
 
 void update_lang(void)
 {
@@ -44,7 +62,12 @@ void update_lang(void)
 				_DBG("*****appcore setlocale=%s\n", r);
 			}
 		}
+
+		__load_lang_info_for_fallback_translated_msg(lang);
+
 		free(lang);
+	} else {
+		_ERR("failed to get current language for set lang env");
 	}
 }
 
@@ -71,6 +94,8 @@ void update_region(void)
 			_DBG("*****appcore setlocale=%s\n", r);
 		}
 		free(region);
+	} else {
+		_ERR("failed to get current region format for set region env");
 	}
 }
 
@@ -145,6 +170,7 @@ EXPORT_API int appcore_get_timeformat(enum appcore_time_format *timeformat)
 	int r;
 
 	if (timeformat == NULL) {
+		_ERR("timeformat is null");
 		errno = EINVAL;
 		return -1;
 	}
@@ -156,4 +182,45 @@ EXPORT_API int appcore_get_timeformat(enum appcore_time_format *timeformat)
 		return -1;
 	} else
 		return 0;
+}
+
+EXPORT_API char *appcore_get_i18n_text(const char *msgid)
+{
+	char *cur_env = NULL;
+	char *get_env = NULL;
+	char *translated_msg = NULL;
+
+	if(!msgid) {
+		_ERR("msgid is null");
+		errno = EINVAL;
+		return NULL;
+	}
+
+	// get msg based on current locale env
+	translated_msg = gettext(msgid);
+	if(strncmp(msgid, translated_msg, strlen(msgid)) != 0) {
+		goto func_out;
+	}
+
+	// backup current LC_MESSAGES locale value
+	get_env = setlocale(LC_MESSAGES, NULL);
+	if(get_env) {
+		cur_env = strdup(get_env);
+	}
+
+	// Fallback #1 - get msg based on current language setting value
+	if(current_lang) {
+		setlocale(LC_MESSAGES, current_lang);
+		translated_msg = gettext(msgid);
+		if(strncmp(msgid, translated_msg, strlen(msgid)) != 0) {
+			goto func_out;
+		}
+	}
+
+func_out :
+	if(cur_env) {
+		setlocale(LC_MESSAGES, cur_env);
+		free(cur_env);
+	}
+	return translated_msg;
 }

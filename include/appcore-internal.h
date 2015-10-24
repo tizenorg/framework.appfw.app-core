@@ -27,7 +27,9 @@
 #define LOG_TAG "APP_CORE"
 
 #include <stdio.h>
+#include <stdbool.h>
 #include <dlog.h>
+#include <bundle.h>
 #include "appcore-common.h"
 
 
@@ -36,6 +38,7 @@
 #endif
 
 #  define _ERR(fmt, arg...) LOGE(fmt, ##arg)
+#  define _WARN(fmt, arg...) LOGW(fmt, ##arg)
 #  define _INFO(...) LOGI(__VA_ARGS__)
 #  define _DBG(...) LOGD(__VA_ARGS__)
 
@@ -110,6 +113,7 @@ enum app_event {
 	AE_UNKNOWN,
 	AE_CREATE,
 	AE_TERMINATE,
+	AE_TERMINATE_BGAPP,
 	AE_PAUSE,
 	AE_RESUME,
 	AE_RESET,
@@ -127,6 +131,7 @@ enum sys_event {
 	SE_LOWBAT,
 	SE_LANGCHG,
 	SE_REGIONCHG,
+	SE_SUSPENDED_STATE,
 	SE_MAX
 };
 
@@ -143,6 +148,9 @@ struct sys_op {
  */
 struct appcore {
 	int state;
+	unsigned int tid;
+	bool suspended_state;
+	bool allowed_bg;
 
 	const struct ui_ops *ops;
 	struct sys_op sops[SE_MAX];
@@ -164,6 +172,7 @@ void update_region(void);
 
 /* appcore-X.c */
 extern int x_raise_win(pid_t pid);
+extern int x_pause_win(pid_t pid);
 
 /* appcore-util.c */
 /* extern void stack_trim(void);*/
@@ -179,6 +188,15 @@ struct ui_wm_rotate {
    int (*resume_rotation_cb) (void);
 };
 int appcore_set_wm_rotation(struct ui_wm_rotate* wm_rotate);
+
+void appcore_group_reset(bundle *b);
+void appcore_group_attach();
+void appcore_group_lower();
+unsigned int appcore_get_main_window();
+
+int _appcore_request_to_suspend(int pid);
+int _appcore_init_suspend_dbus_handler(void *data);
+int _appcore_fini_suspend_dbus_handler(void *data);
 
 #define ENV_START "APP_START_TIME"
 

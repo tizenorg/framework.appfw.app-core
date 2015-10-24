@@ -33,11 +33,17 @@
 #include <glib.h>
 #include <sys/time.h>
 #include <dlfcn.h>
+#include <stdbool.h>
+#include <dbus/dbus.h>
+#include <dbus/dbus-glib-lowlevel.h>
 #include <vconf.h>
 #include <aul.h>
+#include <bundle_internal.h>
+#include <launch/app_signal.h>
 #include "appcore-internal.h"
 
 #define SQLITE_FLUSH_MAX		(1024*1024)
+#define MAX_LOCAL_BUFSZ 128
 
 #define PKGNAME_MAX 256
 #define PATH_APP_ROOT "/opt/usr/apps"
@@ -55,8 +61,10 @@ static enum appcore_event to_ae[SE_MAX] = {
 	APPCORE_EVENT_LOW_BATTERY,	/* SE_LOWBAT */
 	APPCORE_EVENT_LANG_CHANGE,	/* SE_LANGCGH */
 	APPCORE_EVENT_REGION_CHANGE,
+	APPCORE_EVENT_SUSPENDED_STATE_CHANGE,
 };
 
+static int appcore_event_initialized[SE_MAX] = {0};
 
 enum cb_type {			/* callback */
 	_CB_NONE,
@@ -92,10 +100,6 @@ static struct open_s open;
 static int __app_terminate(void *data);
 static int __app_resume(void *data);
 static int __app_reset(void *data, bundle *k);
-#ifdef _APPFW_FEATURE_VISIBILITY_CHECK_BY_LCD_STATUS
-static int __app_resume_lcd_on(void *data);
-static int __app_pause_lcd_off(void *data);
-#endif
 
 static int __sys_lowmem_post(void *data, void *evt);
 static int __sys_lowmem(void *data, void *evt);
@@ -138,26 +142,63 @@ static struct evt_ops evtops[] = {
 	 },
 };
 
+#ifdef _APPFW_FEATURE_BACKGROUND_MANAGEMENT
+static DBusConnection *bus = NULL;
+static int __suspend_dbus_handler_initialized = 0;
+#endif
+
 static int __get_dir_name(char *dirname)
 {
 	char pkgid[PKGNAME_MAX];
 	int r;
 	int pid;
+	char *cmdline = NULL;
+	char *name = NULL;
+	int len = 0;
 
 	pid = getpid();
 	if (pid < 0)
 		return -1;
 
-	if (aul_app_get_pkgid_bypid(pid, pkgid, PKGNAME_MAX) != AUL_R_OK)
+	cmdline = aul_get_cmdline_bypid(pid);
+	if (cmdline == NULL) {
+		_ERR("cmdline is null");
 		return -1;
+	}
 
-	r = snprintf(dirname, PATH_MAX, PATH_APP_ROOT "/%s" PATH_RES PATH_LOCALE,pkgid);
-	if (r < 0)
-		return -1;
-	if (access(dirname, R_OK) == 0) return 0;
-	r = snprintf(dirname, PATH_MAX, PATH_RO_APP_ROOT "/%s" PATH_RES PATH_LOCALE,pkgid);
-	if (r < 0)
-		return -1;
+	//for handling wrt case
+	if (strncmp(cmdline, PATH_APP_ROOT, strlen(PATH_APP_ROOT)) != 0
+			&& strncmp(cmdline, PATH_RO_APP_ROOT, strlen(PATH_RO_APP_ROOT)) != 0) {
+		free(cmdline);
+
+		if (aul_app_get_pkgid_bypid(pid, pkgid, PKGNAME_MAX) != AUL_R_OK)
+			return -1;
+
+		r = snprintf(dirname, PATH_MAX, PATH_APP_ROOT "/%s" PATH_RES PATH_LOCALE, pkgid);
+		if (r < 0)
+			return -1;
+
+		if (access(dirname, R_OK) == 0)
+			return 0;
+
+		r = snprintf(dirname, PATH_MAX, PATH_RO_APP_ROOT "/%s" PATH_RES PATH_LOCALE, pkgid);
+		if (r < 0)
+			return -1;
+	}
+	else {
+		name = (char *)g_strrstr(cmdline, "/");
+		name[0] = '\0';
+		name = (char *)g_strrstr(cmdline, "/");
+		name[0] = '\0';
+
+		len = strlen(cmdline);
+		strncpy(dirname, cmdline, len);
+		dirname[len] = '\0';
+
+		len = strlen(dirname);
+		strncat(dirname, "/res/locale", PATH_MAX - len);
+		free(cmdline);
+	}
 
 	return 0;
 }
@@ -172,6 +213,18 @@ static int __app_terminate(void *data)
 	ac->ops->cb_app(AE_TERMINATE, ac->ops->data, NULL);
 
 	return 0;
+}
+
+static int __bgapp_terminate(void *data)
+{
+        struct appcore *ac = data;
+
+        _retv_if(ac == NULL || ac->ops == NULL, -1);
+        _retv_if(ac->ops->cb_app == NULL, 0);
+
+        ac->ops->cb_app(AE_TERMINATE_BGAPP, ac->ops->data, NULL);
+
+        return 0;
 }
 
 static gboolean __prt_ltime(gpointer data)
@@ -204,21 +257,11 @@ static int __app_resume(void *data)
 	return 0;
 }
 
-#ifdef _APPFW_FEATURE_VISIBILITY_CHECK_BY_LCD_STATUS
-static int __app_resume_lcd_on(void *data)
+static int __app_pause(void *data)
 {
-	struct appcore *ac = data;
-	ac->ops->cb_app(AE_RESUME, ac->ops->data, NULL);
+	x_pause_win(getpid());
 	return 0;
 }
-
-static int __app_pause_lcd_off(void *data)
-{
-	struct appcore *ac = data;
-	ac->ops->cb_app(AE_PAUSE, ac->ops->data, NULL);
-	return 0;
-}
-#endif
 
 static int __sys_do_default(struct appcore *ac, enum sys_event event)
 {
@@ -261,6 +304,10 @@ static int __sys_lowmem_post(void *data, void *evt)
 	if (val >= VCONFKEY_SYSMAN_LOW_MEMORY_SOFT_WARNING)	{
 #if defined(MEMORY_FLUSH_ACTIVATE)
 		struct appcore *ac = data;
+
+		_retv_if(ac == NULL || ac->ops == NULL, -1);
+		_retv_if(ac->ops->cb_app == NULL, 0);
+
 		ac->ops->cb_app(AE_LOWMEM_POST, ac->ops->data, NULL);
 #else
 		malloc_trim(0);
@@ -370,57 +417,192 @@ static void __vconf_cb(keynode_t *key, void *data)
 	}
 }
 
-static int __add_vconf(struct appcore *ac)
+static int __add_vconf(struct appcore *ac, enum sys_event se)
 {
-	int i;
 	int r;
 
-	for (i = 0; i < sizeof(evtops) / sizeof(evtops[0]); i++) {
-		struct evt_ops *eo = &evtops[i];
+	switch (se) {
+	case SE_LOWMEM:
+		r = vconf_notify_key_changed(VCONFKEY_SYSMAN_LOW_MEMORY, __vconf_cb, ac);
+		break;
+	case SE_LOWBAT:
+		r = vconf_notify_key_changed(VCONFKEY_SYSMAN_BATTERY_STATUS_LOW, __vconf_cb, ac);
+		break;
+	case SE_LANGCHG:
+		r = vconf_notify_key_changed(VCONFKEY_LANGSET, __vconf_cb, ac);
+		break;
+	case SE_REGIONCHG:
+		r = vconf_notify_key_changed(VCONFKEY_REGIONFORMAT, __vconf_cb, ac);
+		if (r < 0)
+			break;
 
-		switch (eo->type) {
-		case _CB_VCONF:
-			r = vconf_notify_key_changed(eo->key.vkey, __vconf_cb,
-						     ac);
+		r = vconf_notify_key_changed(VCONFKEY_REGIONFORMAT_TIME1224, __vconf_cb, ac);
+		break;
+	default:
+		r = -1;
+		break;
+	}
+
+	return r;
+}
+
+static int __del_vconf(enum sys_event se)
+{
+	int r;
+
+	switch (se) {
+	case SE_LOWMEM:
+		r = vconf_ignore_key_changed(VCONFKEY_SYSMAN_LOW_MEMORY, __vconf_cb);
+		break;
+	case SE_LOWBAT:
+		r = vconf_ignore_key_changed(VCONFKEY_SYSMAN_BATTERY_STATUS_LOW, __vconf_cb);
+		break;
+	case SE_LANGCHG:
+		r = vconf_ignore_key_changed(VCONFKEY_LANGSET, __vconf_cb);
+		break;
+	case SE_REGIONCHG:
+		r = vconf_ignore_key_changed(VCONFKEY_REGIONFORMAT, __vconf_cb);
+		if (r < 0)
 			break;
-		default:
-			/* do nothing */
-			break;
+
+		r = vconf_ignore_key_changed(VCONFKEY_REGIONFORMAT_TIME1224, __vconf_cb);
+		break;
+	default:
+		r = -1;
+		break;
+	}
+
+	return r;
+}
+
+static int __del_vconf_list(void)
+{
+	int r;
+	enum sys_event se;
+
+	for (se = SE_LOWMEM; se < SE_MAX; se++) {
+		if (appcore_event_initialized[se]) {
+			r = __del_vconf(se);
+			if (r < 0)
+				_ERR("Delete vconf callback failed");
+			else
+				appcore_event_initialized[se] = 0;
 		}
 	}
 
 	return 0;
 }
 
-static int __del_vconf(void)
+EXPORT_API int _appcore_request_to_suspend(int pid)
 {
-	int i;
-	int r;
+#ifdef _APPFW_FEATURE_BACKGROUND_MANAGEMENT
+	static DBusConnection* conn = NULL;
+	DBusMessage *message;
+	DBusError err;
 
-	for (i = 0; i < sizeof(evtops) / sizeof(evtops[0]); i++) {
-		struct evt_ops *eo = &evtops[i];
+	dbus_error_init(&err);
 
-		switch (eo->type) {
-		case _CB_VCONF:
-			r = vconf_ignore_key_changed(eo->key.vkey, __vconf_cb);
-			break;
-		default:
-			/* do nothing */
-			break;
+	if (conn == NULL) {
+		conn = dbus_bus_get(DBUS_BUS_SYSTEM, &err);
+		if (!conn) {
+			_ERR("Fail to dbus_bus_get : %s", err.message);
+			return -1;
 		}
 	}
 
+	message = dbus_message_new_signal(APPFW_SUSPEND_HINT_PATH,
+			APPFW_SUSPEND_HINT_INTERFACE,
+			APPFW_SUSPEND_HINT_SIGNAL);
+
+	if (dbus_message_append_args(message,
+				DBUS_TYPE_INT32, &pid,
+				DBUS_TYPE_INVALID) == FALSE) {
+		_ERR("Failed to load data error");
+		return -1;
+	}
+
+	if (dbus_connection_send(conn, message, NULL) == FALSE) {
+		_ERR("dbus send error");
+		return -1;
+	}
+
+	dbus_connection_flush(conn);
+	dbus_message_unref(message);
+
+	SECURE_LOGD("[__SUSPEND__] Send suspend hint, pid: %d", pid);
+#endif
 	return 0;
+}
+
+#ifdef _APPFW_FEATURE_BACKGROUND_MANAGEMENT
+static gboolean __flush_memory(gpointer data)
+{
+	int suspend = APPCORE_SUSPENDED_STATE_WILL_ENTER_SUSPEND;
+	struct appcore *ac = (struct appcore *)data;
+
+	appcore_flush_memory();
+
+	if (!ac) {
+		return FALSE;
+	}
+	ac->tid = 0;
+
+	if (!ac->allowed_bg && !ac->suspended_state) {
+		_DBG("[__SUSPEND__] flush case");
+		__sys_do(ac, &suspend, SE_SUSPENDED_STATE);
+		_appcore_request_to_suspend(getpid()); //send dbus signal to resourced
+		ac->suspended_state = true;
+	}
+
+	return FALSE;
+}
+#endif
+
+#ifdef _APPFW_FEATURE_BACKGROUND_MANAGEMENT
+static void __add_suspend_timer(struct appcore *ac)
+{
+	ac->tid = g_timeout_add_seconds(5, __flush_memory, ac);
+}
+#endif
+
+static void __remove_suspend_timer(struct appcore *ac)
+{
+#ifdef _APPFW_FEATURE_BACKGROUND_MANAGEMENT
+	if (ac->tid > 0) {
+		g_source_remove(ac->tid);
+		ac->tid = 0;
+	}
+#endif
 }
 
 static int __aul_handler(aul_type type, bundle *b, void *data)
 {
 	int ret;
 	const char *str = NULL;
+	const char *bg = NULL;
+	struct appcore *ac = data;
 
 	switch (type) {
 	case AUL_START:
 		_DBG("[APP %d]     AUL event: AUL_START", _pid);
+#ifdef _APPFW_FEATURE_EXPANSION_PKG_INSTALL
+		const char *tep_path = NULL;
+		tep_path = bundle_get_val(b, AUL_TEP_PATH);
+		if (tep_path) {
+			ret = aul_check_tep_mount(tep_path);
+			if (ret == -1) {
+				_ERR("mount request not completed within 1 sec");
+				exit(-1);
+			}
+		}
+#endif
+		bg = bundle_get_val(b, AUL_K_ALLOWED_BG);
+		if (bg && strncmp(bg, "ALLOWED_BG", strlen("ALLOWED_BG")) == 0) {
+			_DBG("[__SUSPEND__] allowed background");
+			ac->allowed_bg = true;
+			__remove_suspend_timer(data);
+		}
+
 		__app_reset(data, b);
 		str = bundle_get_val(b, AUL_K_CALLER_APPID);
 		SECURE_LOGD("caller_appid : %s", str);
@@ -431,6 +613,13 @@ static int __aul_handler(aul_type type, bundle *b, void *data)
 		break;
 	case AUL_RESUME:
 		_DBG("[APP %d]     AUL event: AUL_RESUME", _pid);
+		bg = bundle_get_val(b, AUL_K_ALLOWED_BG);
+		if (bg && strncmp(bg, "ALLOWED_BG", strlen("ALLOWED_BG")) == 0) {
+			_DBG("[__SUSPEND__] allowed background");
+			ac->allowed_bg = true;
+			__remove_suspend_timer(data);
+		}
+
 		if(open.callback) {
 			ret = open.callback(open.cbdata);
 			if (ret == 0)
@@ -441,18 +630,22 @@ static int __aul_handler(aul_type type, bundle *b, void *data)
 		break;
 	case AUL_TERMINATE:
 		_DBG("[APP %d]     AUL event: AUL_TERMINATE", _pid);
+		if (!ac->allowed_bg) {
+			__remove_suspend_timer(data);
+		}
 		__app_terminate(data);
 		break;
-#ifdef _APPFW_FEATURE_VISIBILITY_CHECK_BY_LCD_STATUS
-	case AUL_RESUME_LCD_ON:
-		_DBG("[APP %d]     AUL event: AUL_RESUME_LCD_ON", _pid);
-		__app_resume_lcd_on(data);
+	case AUL_TERMINATE_BGAPP:
+		_DBG("[APP %d]     AUL event: AUL_TERMINATE_BGAPP", _pid);
+		if (!ac->allowed_bg) {
+			__remove_suspend_timer(data);
+		}
+		__bgapp_terminate(data);
 		break;
-	case AUL_PAUSE_LCD_OFF:
-		_DBG("[APP %d]     AUL event: AUL_PAUSE_LCD_OFF", _pid);
-		__app_pause_lcd_off(data);
+	case AUL_PAUSE:
+		_DBG("[APP %d]	   AUL event: AUL_PAUSE", _pid);
+		__app_pause(data);
 		break;
-#endif
 	default:
 		_DBG("[APP %d]     AUL event: %d", _pid, type);
 		/* do nothing */
@@ -488,6 +681,7 @@ EXPORT_API int appcore_set_event_callback(enum appcore_event event,
 	struct appcore *ac = &core;
 	struct sys_op *op;
 	enum sys_event se;
+	int r = 0;
 
 	for (se = SE_UNKNOWN; se < SE_MAX; se++) {
 		if (event == to_ae[se])
@@ -505,13 +699,25 @@ EXPORT_API int appcore_set_event_callback(enum appcore_event event,
 	op->func = cb;
 	op->data = data;
 
-	return 0;
+	if (op->func && !appcore_event_initialized[se]) {
+		r = __add_vconf(ac, se);
+		if (r < 0)
+			_ERR("Add vconf callback failed");
+		else
+			appcore_event_initialized[se] = 1;
+	} else if (!op->func && appcore_event_initialized[se]) {
+		r = __del_vconf(se);
+		if (r < 0)
+			_ERR("Delete vconf callback failed");
+		else
+			appcore_event_initialized[se] = 0;
+	}
+
+	return r;
 }
 
-
-
 EXPORT_API int appcore_init(const char *name, const struct ui_ops *ops,
-			    int argc, char **argv)
+		int argc, char **argv)
 {
 	int r;
 	char dirname[PATH_MAX];
@@ -533,9 +739,9 @@ EXPORT_API int appcore_init(const char *name, const struct ui_ops *ops,
 	r = set_i18n(name, dirname);
 	_retv_if(r == -1, -1);
 
-	r = __add_vconf(&core);
+	r = _appcore_init_suspend_dbus_handler(&core);
 	if (r == -1) {
-		_ERR("Add vconf callback failed");
+		_ERR("Initailzing suspended state handler failed");
 		goto err;
 	}
 
@@ -553,30 +759,39 @@ EXPORT_API int appcore_init(const char *name, const struct ui_ops *ops,
 
 	core.ops = ops;
 	core.state = 1;		/* TODO: use enum value */
+	core.tid = 0;
+	core.suspended_state = false;
+	core.allowed_bg = false;
 
 	_pid = getpid();
 
 	return 0;
  err:
-	__del_vconf();
+	__del_vconf_list();
 	__clear(&core);
+	_appcore_fini_suspend_dbus_handler(&core);
 	return -1;
 }
 
 EXPORT_API void appcore_exit(void)
 {
 	if (core.state) {
-		__del_vconf();
+		__del_vconf_list();
 		__clear(&core);
+		_appcore_fini_suspend_dbus_handler(&core);
+		__remove_suspend_timer(&core);
 	}
 	aul_finalize();
+}
+
+EXPORT_API void appcore_get_app_core(struct appcore **ac)
+{
+	*ac = &core;
 }
 
 EXPORT_API int appcore_flush_memory(void)
 {
 	int (*flush_fn) (int);
-	int size = 0;
-
 	struct appcore *ac = &core;
 
 	if (!core.state) {
@@ -585,6 +800,7 @@ EXPORT_API int appcore_flush_memory(void)
 	}
 
 	//_DBG("[APP %d] Flushing memory ...", _pid);
+	_retv_if(ac == NULL || ac->ops == NULL, -1);
 
 	if (ac->ops->cb_app) {
 		ac->ops->cb_app(AE_MEM_FLUSH, ac->ops->data, NULL);
@@ -592,7 +808,7 @@ EXPORT_API int appcore_flush_memory(void)
 
 	flush_fn = dlsym(RTLD_DEFAULT, "sqlite3_release_memory");
 	if (flush_fn) {
-		size = flush_fn(SQLITE_FLUSH_MAX);
+		flush_fn(SQLITE_FLUSH_MAX);
 	}
 
 	malloc_trim(0);
@@ -602,6 +818,131 @@ EXPORT_API int appcore_flush_memory(void)
 	*/
 
 	//_DBG("[APP %d] Flushing memory DONE", _pid);
+
+	return 0;
+}
+
+#ifdef _APPFW_FEATURE_BACKGROUND_MANAGEMENT
+static DBusHandlerResult
+__suspend_dbus_signal_filter(DBusConnection *conn, DBusMessage *message, void *user_data)
+{
+	const char *sender;
+	const char *interface;
+	int pid;
+	int state;
+	int suspend;
+
+	DBusError error;
+	dbus_error_init(&error);
+
+	sender = dbus_message_get_sender(message);
+	if (sender == NULL)
+		return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+
+	interface = dbus_message_get_interface(message);
+	if (interface == NULL) {
+		_ERR("reject by security issue - no interface\n");
+		return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+	}
+
+	if (dbus_message_is_signal(message, interface, RESOURCED_FREEZER_SIGNAL)) {
+		if (dbus_message_get_args(message, &error, DBUS_TYPE_INT32, &state,
+					DBUS_TYPE_INT32, &pid, DBUS_TYPE_INVALID) == FALSE) {
+			_ERR("Failed to get data: %s", error.message);
+			dbus_error_free(&error);
+			return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+		}
+
+		if (pid == getpid() && state == 0) { //thawed
+			suspend = APPCORE_SUSPENDED_STATE_DID_EXIT_FROM_SUSPEND;
+		    SECURE_LOGD("[__SUSPEND__] state: %d (0: thawed, 1: frozen), pid: %d", state, pid);
+
+			struct appcore *ac = (struct appcore *)user_data;
+			if (!ac->allowed_bg && ac->suspended_state) {
+				__remove_suspend_timer(ac);
+				__sys_do(user_data, &suspend, SE_SUSPENDED_STATE);
+				ac->suspended_state = false;
+				__add_suspend_timer(ac);
+			}
+		}
+	}
+
+	return DBUS_HANDLER_RESULT_HANDLED;
+}
+#endif
+
+int _appcore_init_suspend_dbus_handler(void *data)
+{
+#ifdef _APPFW_FEATURE_BACKGROUND_MANAGEMENT
+	DBusError error;
+	char rule[MAX_LOCAL_BUFSZ];
+
+	if (__suspend_dbus_handler_initialized)
+		return 0;
+
+	dbus_error_init(&error);
+	if (!bus) {
+		bus = dbus_bus_get_private(DBUS_BUS_SYSTEM, &error);
+		if (!bus) {
+			_ERR("Failed to connect to the D-BUS daemon: %s", error.message);
+			dbus_error_free(&error);
+			return -1;
+		}
+	}
+	dbus_connection_setup_with_g_main(bus, NULL);
+
+	snprintf(rule, MAX_LOCAL_BUFSZ,
+		 "path='%s',type='signal',interface='%s'", RESOURCED_FREEZER_PATH, RESOURCED_FREEZER_INTERFACE);
+	/* listening to messages */
+	dbus_bus_add_match(bus, rule, &error);
+	if (dbus_error_is_set(&error)) {
+		_ERR("Fail to rule set: %s", error.message);
+		dbus_error_free(&error);
+		return -1;
+	}
+
+	if (dbus_connection_add_filter(bus, __suspend_dbus_signal_filter, data, NULL) == FALSE) {
+		_ERR("add filter fail");
+		return -1;
+	}
+
+	__suspend_dbus_handler_initialized = 1;
+	_DBG("[__SUSPEND__] suspend signal initialized");
+#endif
+
+	return 0;
+}
+
+int _appcore_fini_suspend_dbus_handler(void* data)
+{
+#ifdef _APPFW_FEATURE_BACKGROUND_MANAGEMENT
+	DBusError error;
+	char rule[MAX_LOCAL_BUFSZ];
+
+	if (!__suspend_dbus_handler_initialized)
+		return 0;
+
+	dbus_error_init(&error);
+
+	dbus_connection_remove_filter(bus, __suspend_dbus_signal_filter, data);
+
+	snprintf(rule, MAX_LOCAL_BUFSZ,
+		 "path='%s',type='signal',interface='%s'", RESOURCED_FREEZER_PATH, RESOURCED_FREEZER_INTERFACE);
+	dbus_bus_remove_match(bus, rule, &error);
+	if (dbus_error_is_set(&error)) {
+		_ERR("Fail to rule unset: %s", error.message);
+		dbus_error_free(&error);
+		return -1;
+	}
+
+	dbus_connection_close(bus);
+	dbus_connection_unref(bus);
+
+	bus = NULL;
+
+	__suspend_dbus_handler_initialized = 0;
+	_DBG("[__SUSPEND__] suspend signal finalized");
+#endif
 
 	return 0;
 }
